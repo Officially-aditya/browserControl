@@ -133,6 +133,7 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
       disableBackgroundNetworking: false,
       extraArgs: [
         `--ignore-certificate-errors-spki-list=${certSpki}`,
+        "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets",
         `--disable-extensions-except=${extensionDir}`,
         `--load-extension=${extensionDir}`,
       ],
