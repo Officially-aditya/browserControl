@@ -53,6 +53,18 @@ export async function launchRealChrome(options: {
   const proc = spawn(chromePath, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
+  let stderr = "";
+  let stdout = "";
+  let exitCode: number | null = null;
+  proc.stderr?.on("data", (chunk) => {
+    stderr = (stderr + chunk.toString()).slice(-16_384);
+  });
+  proc.stdout?.on("data", (chunk) => {
+    stdout = (stdout + chunk.toString()).slice(-8_192);
+  });
+  proc.once("exit", (code) => {
+    exitCode = code;
+  });
 
   const activePortFile = path.join(tempDir, "DevToolsActivePort");
   const startTime = Date.now();
@@ -60,6 +72,7 @@ export async function launchRealChrome(options: {
   let wsPath = "";
 
   while (Date.now() - startTime < 15000) {
+    if (exitCode !== null) break;
     try {
       const content = await fs.readFile(activePortFile, "utf8");
       const lines = content.trim().split("\n").map((l) => l.trim());
@@ -75,9 +88,13 @@ export async function launchRealChrome(options: {
   }
 
   if (!port || !wsPath) {
-    proc.kill("SIGKILL");
+    try { proc.kill("SIGKILL"); } catch {}
     await fs.rm(tempDir, { recursive: true, force: true });
-    throw new Error("Timed out waiting for Chrome DevToolsActivePort");
+    throw new Error(
+      `Timed out waiting for Chrome DevToolsActivePort (path=${chromePath}, exitCode=${exitCode ?? "running"})` +
+      `${stderr ? `\nstderr:\n${stderr}` : ""}` +
+      `${stdout ? `\nstdout:\n${stdout}` : ""}`
+    );
   }
 
   const wsUrl = `ws://127.0.0.1:${port}${wsPath.startsWith("/") ? "" : "/"}${wsPath}`;
