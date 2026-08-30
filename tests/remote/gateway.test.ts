@@ -3,7 +3,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import WebSocket from "ws";
 import { runRemoteGateway } from "../../src/remote/gateway.js";
-import type http from "node:http";
 
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -111,6 +110,7 @@ describe("Remote web-control gateway", () => {
       const click = calls.find((call) => call.method === "click");
       expect(click).toBeDefined();
       expect(click!.params).toMatchObject({ observationId, x: 625, y: 410, button: "left" });
+      await client.callTool({ name: "browser_release_control", arguments: {} });
     } finally {
       await client.close();
     }
@@ -133,6 +133,7 @@ describe("Remote web-control gateway", () => {
       await first.client.callTool({ name: "browser_release_control", arguments: {} });
       const afterRelease = await second.client.callTool({ name: "browser_type", arguments: { text: "second" } });
       expect(afterRelease.isError).toBeFalsy();
+      await second.client.callTool({ name: "browser_release_control", arguments: {} });
     } finally {
       await first.client.close();
       await second.client.close();
