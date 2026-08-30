@@ -55,7 +55,8 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
   beforeAll(async () => {
     const keyPath = process.env.BROWSERCONTROL_TEST_TLS_KEY;
     const certPath = process.env.BROWSERCONTROL_TEST_TLS_CERT;
-    if (!keyPath || !certPath) throw new Error("TLS canary certificate paths are required");
+    const certSpki = process.env.BROWSERCONTROL_TEST_TLS_SPKI;
+    if (!keyPath || !certPath || !certSpki) throw new Error("TLS canary certificate paths and SPKI are required");
     const [tlsKey, tlsCert] = await Promise.all([
       fs.readFile(keyPath, "utf8"),
       fs.readFile(certPath, "utf8"),
@@ -79,7 +80,7 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
       headless: false,
       disableBackgroundNetworking: false,
       extraArgs: [
-        "--ignore-certificate-errors",
+        `--ignore-certificate-errors-spki-list=${certSpki}`,
         `--disable-extensions-except=${extensionDir}`,
         `--load-extension=${extensionDir}`,
       ],
