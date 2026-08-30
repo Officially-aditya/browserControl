@@ -13,6 +13,7 @@ describe("Remote web-control gateway", () => {
   let extension: WebSocket;
   const calls: Array<{ method: string; params: any }> = [];
   const observationId = "42:3:test-observation";
+  const regionObservationId = "42:3:test-region";
 
   beforeAll(async () => {
     gateway = await runRemoteGateway({
@@ -48,6 +49,21 @@ describe("Remote web-control gateway", () => {
             title: "Example",
             viewportWidth: 1200,
             viewportHeight: 800,
+            sourceRegion: { x: 0, y: 0, width: 1200, height: 800 },
+            kind: "overview",
+            coordinateSpace: "normalized_1000",
+            mimeType: "image/png",
+            image: ONE_PIXEL_PNG,
+          };
+          break;
+        case "inspect_region":
+          result = {
+            observationId: regionObservationId,
+            sourceObservationId: observationId,
+            visualEpoch: 3,
+            targetId: "42",
+            sourceRegion: { x: 300, y: 200, width: 480, height: 320 },
+            kind: "region",
             coordinateSpace: "normalized_1000",
             mimeType: "image/png",
             image: ONE_PIXEL_PNG,
@@ -83,7 +99,9 @@ describe("Remote web-control gateway", () => {
       const listed = await client.listTools();
       const names = listed.tools.map((tool) => tool.name);
       expect(names).toContain("browser_observe");
+      expect(names).toContain("browser_inspect");
       expect(names).toContain("browser_click");
+      expect(names).toContain("browser_drag");
       expect(names).toContain("browser_tabs");
 
       const result = await client.callTool({ name: "browser_observe", arguments: { format: "png" } });
@@ -92,6 +110,43 @@ describe("Remote web-control gateway", () => {
       expect((result.content[0] as any).text).toContain(observationId);
       expect((result.content[1] as any).type).toBe("image");
       expect((result.content[1] as any).data).toBe(ONE_PIXEL_PNG);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("returns a high-detail region as a new observation and preserves source mapping request", async () => {
+    calls.length = 0;
+    const { client, transport } = createClient();
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: "browser_inspect",
+        arguments: {
+          observationId,
+          x: 250,
+          y: 250,
+          width: 400,
+          height: 400,
+          format: "png",
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content).toHaveLength(2);
+      expect((result.content[0] as any).text).toContain(regionObservationId);
+      expect((result.content[0] as any).text).toContain(observationId);
+      expect((result.content[1] as any).type).toBe("image");
+
+      const inspect = calls.find((call) => call.method === "inspect_region");
+      expect(inspect).toBeDefined();
+      expect(inspect!.params).toMatchObject({
+        observationId,
+        x: 250,
+        y: 250,
+        width: 400,
+        height: 400,
+      });
     } finally {
       await client.close();
     }
