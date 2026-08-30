@@ -48,7 +48,14 @@ export class TabController {
     if (isCurrent) {
       await this.session.detach();
     }
-    return this.targetManager.closeTab(targetId);
+    const closed = await this.targetManager.closeTab(targetId);
+    if (isCurrent) {
+      const remainingTabs = await this.targetManager.listPageTabs();
+      if (remainingTabs.length > 0) {
+        await this.switchTab(remainingTabs[0].targetId);
+      }
+    }
+    return closed;
   }
 
   /**

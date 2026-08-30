@@ -76,6 +76,10 @@
       font-size: 13px;
       margin-top: 4px;
     }
+    textarea {
+      resize: none;
+      height: 45px;
+    }
     [contenteditable="true"] {
       min-height: 40px;
       border: 1px solid #cbd5e1;
@@ -125,9 +129,9 @@
       <div id="last-click-modifiers">Modifiers: none</div>
     </div>
 
-    <!-- Card 2: Nested Scroll Container -->
+    <!-- Card 2: Nested Scroll & Drag Slider -->
     <div class="card">
-      <h3>Nested Scroll</h3>
+      <h3>Scroll & Drag</h3>
       <div id="nested-scroll" class="scroll-box">
         <div class="scroll-content">
           <p>Top of scroll</p>
@@ -136,9 +140,13 @@
         </div>
       </div>
       <div id="scroll-pos" style="margin-top: 6px;">Scroll Top: 0px</div>
+
+      <h4 style="margin-top: 8px;">Drag Slider</h4>
+      <input type="range" id="drag-slider" min="0" max="100" value="0" style="width: 100%; cursor: pointer;" />
+      <div id="slider-val" style="margin-top: 4px;">Slider Value: 0</div>
     </div>
 
-    <!-- Card 3: Inputs, Textareas & Copy/Paste -->
+    <!-- Card 3: Inputs, Textarea & Contenteditable -->
     <div class="card">
       <h3>Inputs & Shortcuts</h3>
       <label>Input A:</label>
@@ -146,6 +154,9 @@
 
       <label style="margin-top: 4px; display: block;">Input B:</label>
       <input type="text" id="input-b" placeholder="Paste here..." />
+
+      <label style="margin-top: 4px; display: block;">Textarea:</label>
+      <textarea id="textarea-input" placeholder="Type notes here..."></textarea>
 
       <label style="margin-top: 4px; display: block;">Contenteditable:</label>
       <div id="editor" contenteditable="true">Initial editable content</div>
@@ -174,6 +185,7 @@
       rightClicks: 0,
       hoverSelected: null,
       scrollPosition: 0,
+      sliderValue: 0,
       lastClickShift: false,
       lastClickMeta: false,
       lastClickCtrl: false,
@@ -223,6 +235,18 @@
       window.__STATE__.scrollPosition = scrollBox.scrollTop;
       document.getElementById('scroll-pos').innerText = `Scroll Top: ${Math.round(scrollBox.scrollTop)}px`;
     });
+
+    const slider = document.getElementById('drag-slider');
+    if (slider) {
+      slider.addEventListener('input', () => {
+        window.__STATE__.sliderValue = Number(slider.value);
+        document.getElementById('slider-val').innerText = `Slider Value: ${slider.value}`;
+      });
+      slider.addEventListener('change', () => {
+        window.__STATE__.sliderValue = Number(slider.value);
+        document.getElementById('slider-val').innerText = `Slider Value: ${slider.value}`;
+      });
+    }
 
     document.getElementById('trigger-alert').addEventListener('click', () => {
       alert('Alert Test Message');

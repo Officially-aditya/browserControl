@@ -10,14 +10,16 @@
       height: 100vh;
       background: #0f172a;
       overflow: hidden;
-      display: flex;
-      justify-content: center;
-      align-items: center;
+      margin: 0;
+      padding: 0;
     }
     #appCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1000px;
+      height: 700px;
       background: #1e293b;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-      border-radius: 8px;
     }
   </style>
 </head>
@@ -168,10 +170,9 @@
     }
 
     function getCanvasCoords(e) {
-      const rect = canvas.getBoundingClientRect();
       return {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
+        x: e.clientX,
+        y: e.clientY,
       };
     }
 

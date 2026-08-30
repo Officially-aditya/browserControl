@@ -435,7 +435,6 @@ export class ChromeController {
                 const vp = mapper.toViewport(action.x, action.y);
                 const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
                 await this.mouse.move(vp.x, vp.y, explicitMods, signal);
-                this.session.bumpVisualEpoch();
                 break;
               }
 
@@ -474,7 +473,6 @@ export class ChromeController {
                 const vp = mapper.toViewport(action.x, action.y);
                 const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
                 await this.mouse.down(vp.x, vp.y, action.button, explicitMods, signal);
-                this.session.bumpVisualEpoch();
                 break;
               }
 
@@ -487,7 +485,6 @@ export class ChromeController {
                 const vp = mapper.toViewport(action.x, action.y);
                 const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
                 await this.mouse.up(vp.x, vp.y, action.button, explicitMods, signal);
-                this.session.bumpVisualEpoch();
                 break;
               }
 
@@ -534,13 +531,11 @@ export class ChromeController {
 
               case "key_down": {
                 await this.keyboard.keyDown(action.key, signal);
-                this.session.bumpVisualEpoch();
                 break;
               }
 
               case "key_up": {
                 await this.keyboard.keyUp(action.key, signal);
-                this.session.bumpVisualEpoch();
                 break;
               }
 

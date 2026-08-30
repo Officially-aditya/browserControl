@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { MouseController } from "../../src/input/mouse.js";
 import { DragController } from "../../src/input/drag.js";
+import { KeyboardController } from "../../src/input/keyboard.js";
 import { InputStateManager } from "../../src/input/state.js";
 
 describe("Mouse & Drag Controllers with InputStateManager", () => {
@@ -122,5 +123,48 @@ describe("Mouse & Drag Controllers with InputStateManager", () => {
     expect(lastEvent.params.type).toBe("mouseReleased");
     expect(lastEvent.params.x).toBe(200);
     expect(lastEvent.params.y).toBe(150);
+  });
+
+  it("should reset held mouse buttons without erasing held keyboard state", async () => {
+    const sentMessages: Array<{ method: string; params: any }> = [];
+    const mockSession = {
+      send: vi.fn().mockImplementation((method: string, params: any) => {
+        sentMessages.push({ method, params });
+        return Promise.resolve({});
+      }),
+    } as any;
+
+    const inputState = new InputStateManager();
+    const mouse = new MouseController(mockSession, inputState);
+    const keyboard = new KeyboardController(mockSession, inputState);
+
+    // Hold Shift key and hold left mouse button
+    inputState.setKeyDown("Shift");
+    inputState.setMouseDown("left");
+    inputState.setMouseDown("right");
+
+    expect(inputState.modifierBitmask).toBe(8);
+    expect(inputState.buttonsBitmask).toBe(3); // 1 + 2
+
+    // Reset mouse controller
+    await mouse.reset();
+
+    // Mouse buttons released, but keyboard keys preserved!
+    expect(inputState.buttonsBitmask).toBe(0);
+    expect(inputState.pressedButtons.size).toBe(0);
+    expect(inputState.modifierBitmask).toBe(8);
+    expect(inputState.pressedKeys.has("Shift")).toBe(true);
+
+    const releasedEvents = sentMessages.filter((m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseReleased");
+    expect(releasedEvents.length).toBe(2);
+
+    // Now reset keyboard controller
+    await keyboard.reset();
+    expect(inputState.modifierBitmask).toBe(0);
+    expect(inputState.pressedKeys.size).toBe(0);
+
+    const keyUpEvents = sentMessages.filter((m) => m.method === "Input.dispatchKeyEvent" && m.params?.type === "keyUp");
+    expect(keyUpEvents.length).toBe(1);
+    expect(keyUpEvents[0].params.key).toBe("Shift");
   });
 });

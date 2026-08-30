@@ -388,10 +388,10 @@ export class KeyboardController {
   }
 
   /**
-   * Reset all held keyboard keys
+   * Reset all held keyboard keys without affecting mouse state
    */
   public async reset(): Promise<void> {
-    const { releasedKeys } = this.inputState.reset();
+    const { releasedKeys } = this.inputState.resetKeyboard();
     for (const key of releasedKeys) {
       try {
         const def = this.getKeyDefinition(key);

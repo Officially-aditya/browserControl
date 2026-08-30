@@ -52,6 +52,23 @@ export class InputStateManager {
     this._cursorY = y;
   }
 
+  public canonicalizeKey(key: string): string {
+    const lower = key.toLowerCase();
+    if (lower === "cmd" || lower === "command" || lower === "super" || lower === "meta") {
+      return "Meta";
+    }
+    if (lower === "ctrl" || lower === "control") {
+      return "Control";
+    }
+    if (lower === "option" || lower === "alt") {
+      return "Alt";
+    }
+    if (lower === "shift") {
+      return "Shift";
+    }
+    return key;
+  }
+
   public parseModifierArray(keys: string[]): number {
     let bitmask = 0;
     for (const key of keys) {
@@ -80,7 +97,9 @@ export class InputStateManager {
   }
 
   public setKeyDown(key: string): void {
-    this._pressedKeys.add(key);
+    const canonical = this.canonicalizeKey(key);
+    this._pressedKeys.add(canonical);
+
     const lower = key.toLowerCase();
     if (lower === "shift") {
       this._modifierBitmask |= MODIFIERS.Shift;
@@ -94,7 +113,9 @@ export class InputStateManager {
   }
 
   public setKeyUp(key: string): void {
-    this._pressedKeys.delete(key);
+    const canonical = this.canonicalizeKey(key);
+    this._pressedKeys.delete(canonical);
+
     const lower = key.toLowerCase();
     if (lower === "shift") {
       this._modifierBitmask &= ~MODIFIERS.Shift;
@@ -119,15 +140,32 @@ export class InputStateManager {
     this._buttonsBitmask &= ~bit;
   }
 
-  public reset(): { releasedKeys: string[]; releasedButtons: MouseButton[] } {
-    const releasedKeys = Array.from(this._pressedKeys);
+  /**
+   * Reset only mouse button state without affecting keyboard state
+   */
+  public resetMouse(): { releasedButtons: MouseButton[] } {
     const releasedButtons = Array.from(this._pressedButtons);
-
-    this._pressedKeys.clear();
-    this._modifierBitmask = 0;
     this._pressedButtons.clear();
     this._buttonsBitmask = 0;
+    return { releasedButtons };
+  }
 
+  /**
+   * Reset only keyboard key state without affecting mouse state
+   */
+  public resetKeyboard(): { releasedKeys: string[] } {
+    const releasedKeys = Array.from(this._pressedKeys);
+    this._pressedKeys.clear();
+    this._modifierBitmask = 0;
+    return { releasedKeys };
+  }
+
+  /**
+   * Reset all input state (both mouse and keyboard)
+   */
+  public reset(): { releasedKeys: string[]; releasedButtons: MouseButton[] } {
+    const { releasedButtons } = this.resetMouse();
+    const { releasedKeys } = this.resetKeyboard();
     return { releasedKeys, releasedButtons };
   }
 }

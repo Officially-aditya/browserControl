@@ -142,12 +142,19 @@ export class TabSession extends EventEmitter {
       };
       this.addSessionListener(`session:${sid}:Page.frameNavigated`, onFrameNavigated);
 
-      // 2. Load events
+      // 2. Load events & SPA intra-document navigations
       const onLoadFired = () => {
         this.bumpVisualEpoch();
         this.emit("loadFired");
       };
       this.addSessionListener(`session:${sid}:Page.loadEventFired`, onLoadFired);
+
+      const onNavigatedWithinDocument = (params: { url: string }) => {
+        this._currentUrl = params.url;
+        this.bumpVisualEpoch();
+        this.emit("navigated", { url: params.url });
+      };
+      this.addSessionListener(`session:${sid}:Page.navigatedWithinDocument`, onNavigatedWithinDocument);
 
       // 3. JavaScript dialog events (alert, confirm, prompt, beforeunload)
       const onDialogOpening = (params: {

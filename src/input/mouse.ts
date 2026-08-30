@@ -219,14 +219,14 @@ export class MouseController {
   }
 
   /**
-   * Emergency reset for mouse buttons and dragging
+   * Emergency reset for mouse buttons and dragging without affecting keyboard state
    */
   public async reset(): Promise<void> {
     try {
       await this.session.send("Input.cancelDragging", {});
     } catch {}
 
-    const { releasedButtons } = this.inputState.reset();
+    const { releasedButtons } = this.inputState.resetMouse();
     for (const btn of releasedButtons) {
       try {
         await this.session.send("Input.dispatchMouseEvent", {
