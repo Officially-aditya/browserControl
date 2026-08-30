@@ -197,12 +197,36 @@ async function inspectRegion(params = {}) {
   };
 }
 
-async function mouseClick(params) {
+async function mouseMove(params) {
+  const record = assertFresh(params.observationId);
+  const p = normalizedPointToSource(params.x, params.y, record);
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y, button: "none" });
+  invalidateVisualState();
+  return { success: true, visualEpoch };
+}
+
+async function mouseClick(params, clickCount = 1) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
   const button = params.button || "left";
-  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount: 1 });
-  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, clickCount: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, clickCount });
+  invalidateVisualState();
+  return { success: true, visualEpoch };
+}
+
+async function drag(params) {
+  const record = assertFresh(params.observationId);
+  if (!Array.isArray(params.path) || params.path.length < 2) throw new Error("drag path requires at least two points");
+  const points = params.path.map((point) => normalizedPointToSource(point.x, point.y, record));
+  const first = points[0];
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: first.x, y: first.y, button: "none" });
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: first.x, y: first.y, button: "left", clickCount: 1 });
+  for (const point of points.slice(1)) {
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "left", buttons: 1 });
+  }
+  const last = points[points.length - 1];
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: last.x, y: last.y, button: "left", clickCount: 1 });
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
@@ -242,6 +266,21 @@ async function navigate(params) {
   return { success: true, visualEpoch, url: params.url };
 }
 
+async function historyAction(direction) {
+  const tabId = await ensureAttached();
+  if (direction === "back") await chrome.tabs.goBack(tabId);
+  else await chrome.tabs.goForward(tabId);
+  invalidateVisualState();
+  return { success: true, visualEpoch };
+}
+
+async function reload() {
+  const tabId = await ensureAttached();
+  await chrome.tabs.reload(tabId);
+  invalidateVisualState();
+  return { success: true, visualEpoch };
+}
+
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
   return tabs.map((tab) => ({ targetId: String(tab.id), windowId: tab.windowId, active: tab.active, title: tab.title || "", url: tab.url || "" }));
@@ -256,6 +295,30 @@ async function switchTab(params) {
   return { success: true, targetId: String(tabId), visualEpoch };
 }
 
+async function newTab(params = {}) {
+  const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
+  if (!tab.id) throw new Error("Failed to create tab");
+  await attach(tab.id);
+  return { success: true, targetId: String(tab.id), visualEpoch };
+}
+
+async function closeTab(params = {}) {
+  const tabId = params.targetId ? Number(params.targetId) : attachedTabId;
+  if (!Number.isInteger(tabId)) throw new Error("No target tab to close");
+  await chrome.tabs.remove(tabId);
+  if (tabId === attachedTabId) {
+    attachedTabId = null;
+    invalidateVisualState();
+  }
+  return { success: true, visualEpoch };
+}
+
+async function handleDialog(params = {}) {
+  await send("Page.handleJavaScriptDialog", { accept: !!params.accept, ...(params.promptText != null ? { promptText: String(params.promptText) } : {}) });
+  invalidateVisualState();
+  return { success: true, visualEpoch };
+}
+
 async function handleRpc(request) {
   if (paused && !["status", "resume", "disconnect"].includes(request.method)) {
     throw Object.assign(new Error("CONTROL_PAUSED"), { code: "CONTROL_PAUSED" });
@@ -264,13 +327,22 @@ async function handleRpc(request) {
     case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN };
     case "observe": return observe(request.params);
     case "inspect_region": return inspectRegion(request.params || {});
-    case "click": return mouseClick(request.params || {});
+    case "move": return mouseMove(request.params || {});
+    case "click": return mouseClick(request.params || {}, 1);
+    case "double_click": return mouseClick(request.params || {}, 2);
+    case "drag": return drag(request.params || {});
     case "scroll": return scroll(request.params || {});
     case "type": return typeText(request.params || {});
     case "keypress": return keypress(request.params || {});
     case "navigate": return navigate(request.params || {});
+    case "back": return historyAction("back");
+    case "forward": return historyAction("forward");
+    case "reload": return reload();
     case "tabs": return listTabs();
     case "switch_tab": return switchTab(request.params || {});
+    case "new_tab": return newTab(request.params || {});
+    case "close_tab": return closeTab(request.params || {});
+    case "handle_dialog": return handleDialog(request.params || {});
     case "attach_active": {
       const tab = await activeTab();
       await attach(tab.id);
