@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: browsercontrol-gateway
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: BROWSERCONTROL_GATEWAY_HOST
+        value: 0.0.0.0
+      - key: BROWSERCONTROL_DEVICE_TOKEN
+        generateValue: true
+      - key: BROWSERCONTROL_MCP_TOKEN
+        generateValue: true
