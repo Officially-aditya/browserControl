@@ -4,6 +4,8 @@ let attachedTabId = null;
 let visualEpoch = 0;
 let paused = false;
 let reconnectTimer = null;
+const observations = new Map();
+const MAX_OBSERVATIONS = 32;
 
 const DEFAULT_CONFIG = {
   gatewayUrl: "ws://127.0.0.1:8787/extension",
@@ -16,17 +18,7 @@ async function getConfig() {
 }
 
 async function setStatus(status, extra = {}) {
-  await chrome.storage.local.set({
-    status,
-    attachedTabId,
-    visualEpoch,
-    paused,
-    ...extra,
-  });
-  updateBadge(status);
-}
-
-function updateBadge(status) {
+  await chrome.storage.local.set({ status, attachedTabId, visualEpoch, paused, ...extra });
   const map = {
     connected: ["ON", "#137333"],
     paused: ["II", "#b06000"],
@@ -36,6 +28,11 @@ function updateBadge(status) {
   const [text, color] = map[status] || ["", "#5f6368"];
   chrome.action.setBadgeText({ text });
   chrome.action.setBadgeBackgroundColor({ color });
+}
+
+function invalidateVisualState() {
+  visualEpoch++;
+  observations.clear();
 }
 
 async function activeTab() {
@@ -49,7 +46,7 @@ async function attach(tabId) {
   if (attachedTabId != null) await detach();
   await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   attachedTabId = tabId;
-  visualEpoch++;
+  invalidateVisualState();
   await chrome.debugger.sendCommand({ tabId }, "Page.enable");
   await chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
   await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
@@ -58,7 +55,7 @@ async function attach(tabId) {
 async function detach() {
   const tabId = attachedTabId;
   attachedTabId = null;
-  visualEpoch++;
+  invalidateVisualState();
   if (tabId != null) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
   }
@@ -77,15 +74,6 @@ async function send(method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
 
-function normalizedPoint(x, y, viewport) {
-  if (![x, y].every(Number.isFinite)) throw new Error("x and y must be finite numbers");
-  if (x < 0 || x > 1000 || y < 0 || y > 1000) throw new Error("normalized coordinates must be between 0 and 1000");
-  return {
-    x: Math.min(viewport.width - Number.EPSILON, Math.max(0, (x / 1000) * viewport.width)),
-    y: Math.min(viewport.height - Number.EPSILON, Math.max(0, (y / 1000) * viewport.height)),
-  };
-}
-
 async function viewport() {
   const metrics = await send("Page.getLayoutMetrics");
   const vv = metrics.cssVisualViewport || metrics.visualViewport;
@@ -97,6 +85,53 @@ async function viewport() {
   };
 }
 
+function mimeType(format) {
+  return format === "png" ? "image/png" : format === "webp" ? "image/webp" : "image/jpeg";
+}
+
+function rememberObservation(record) {
+  observations.set(record.observationId, record);
+  while (observations.size > MAX_OBSERVATIONS) {
+    const oldest = observations.keys().next().value;
+    observations.delete(oldest);
+  }
+}
+
+function assertFresh(observationId) {
+  if (!observationId) throw new Error("observationId is required for coordinate actions");
+  const record = observations.get(String(observationId));
+  if (!record || record.tabId !== attachedTabId || record.visualEpoch !== visualEpoch) {
+    const err = new Error("STALE_OBSERVATION");
+    err.code = "STALE_OBSERVATION";
+    throw err;
+  }
+  return record;
+}
+
+function normalizedRegionToSource(region, sourceRegion) {
+  const values = [region.x, region.y, region.width, region.height];
+  if (!values.every(Number.isFinite)) throw new Error("region coordinates must be finite numbers");
+  if (region.x < 0 || region.y < 0 || region.width <= 0 || region.height <= 0 || region.x + region.width > 1000 || region.y + region.height > 1000) {
+    throw new Error("region must fit inside normalized 0-1000 coordinate space");
+  }
+  return {
+    x: sourceRegion.x + (region.x / 1000) * sourceRegion.width,
+    y: sourceRegion.y + (region.y / 1000) * sourceRegion.height,
+    width: (region.width / 1000) * sourceRegion.width,
+    height: (region.height / 1000) * sourceRegion.height,
+  };
+}
+
+function normalizedPointToSource(x, y, record) {
+  if (![x, y].every(Number.isFinite)) throw new Error("x and y must be finite numbers");
+  if (x < 0 || x > 1000 || y < 0 || y > 1000) throw new Error("normalized coordinates must be between 0 and 1000");
+  const r = record.sourceRegion;
+  return {
+    x: Math.max(0, r.x + (x / 1000) * r.width),
+    y: Math.max(0, r.y + (y / 1000) * r.height),
+  };
+}
+
 async function observe(params = {}) {
   const tabId = await ensureAttached();
   const tab = await chrome.tabs.get(tabId);
@@ -105,11 +140,13 @@ async function observe(params = {}) {
   const quality = params.quality ?? 82;
   const shot = await send("Page.captureScreenshot", {
     format,
-    quality: format === "png" ? undefined : quality,
+    ...(format === "png" ? {} : { quality }),
     fromSurface: true,
     captureBeyondViewport: false,
   });
-  const observationId = `${tabId}:${visualEpoch}:${Date.now()}`;
+  const observationId = `${tabId}:${visualEpoch}:${crypto.randomUUID()}`;
+  const sourceRegion = { x: 0, y: 0, width: vp.width, height: vp.height };
+  rememberObservation({ observationId, tabId, visualEpoch, sourceRegion });
   return {
     observationId,
     visualEpoch,
@@ -118,84 +155,96 @@ async function observe(params = {}) {
     title: tab.title || "",
     viewportWidth: vp.width,
     viewportHeight: vp.height,
+    sourceRegion,
+    kind: "overview",
     coordinateSpace: "normalized_1000",
-    mimeType: format === "png" ? "image/png" : format === "webp" ? "image/webp" : "image/jpeg",
+    mimeType: mimeType(format),
     image: shot.data,
   };
 }
 
-function assertFresh(observationId) {
-  if (!observationId) throw new Error("observationId is required for coordinate actions");
-  const [tab, epoch] = String(observationId).split(":");
-  if (String(attachedTabId) !== tab || Number(epoch) !== visualEpoch) {
-    const err = new Error("STALE_OBSERVATION");
-    err.code = "STALE_OBSERVATION";
-    throw err;
-  }
+async function inspectRegion(params = {}) {
+  const source = assertFresh(params.observationId);
+  const vp = await viewport();
+  const region = normalizedRegionToSource(params, source.sourceRegion);
+  const format = params.format || "png";
+  const quality = params.quality ?? 90;
+  const shot = await send("Page.captureScreenshot", {
+    format,
+    ...(format === "png" ? {} : { quality }),
+    fromSurface: true,
+    captureBeyondViewport: false,
+    clip: {
+      x: vp.pageX + region.x,
+      y: vp.pageY + region.y,
+      width: region.width,
+      height: region.height,
+      scale: 1,
+    },
+  });
+  const observationId = `${attachedTabId}:${visualEpoch}:${crypto.randomUUID()}`;
+  rememberObservation({ observationId, tabId: attachedTabId, visualEpoch, sourceRegion: region });
+  return {
+    observationId,
+    sourceObservationId: params.observationId,
+    visualEpoch,
+    targetId: String(attachedTabId),
+    sourceRegion: region,
+    kind: "region",
+    coordinateSpace: "normalized_1000",
+    mimeType: mimeType(format),
+    image: shot.data,
+  };
 }
 
 async function mouseClick(params) {
-  assertFresh(params.observationId);
-  const vp = await viewport();
-  const p = normalizedPoint(params.x, params.y, vp);
+  const record = assertFresh(params.observationId);
+  const p = normalizedPointToSource(params.x, params.y, record);
   const button = params.button || "left";
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount: 1 });
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, clickCount: 1 });
-  visualEpoch++;
+  invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function scroll(params) {
-  assertFresh(params.observationId);
-  const vp = await viewport();
-  const p = normalizedPoint(params.x ?? 500, params.y ?? 500, vp);
-  await send("Input.dispatchMouseEvent", {
-    type: "mouseWheel",
-    x: p.x,
-    y: p.y,
-    deltaX: params.deltaX || 0,
-    deltaY: params.deltaY || 0,
-  });
-  visualEpoch++;
+  const record = assertFresh(params.observationId);
+  const p = normalizedPointToSource(params.x ?? 500, params.y ?? 500, record);
+  await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: params.deltaX || 0, deltaY: params.deltaY || 0 });
+  invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function typeText(params) {
   await send("Input.insertText", { text: String(params.text ?? "") });
-  visualEpoch++;
+  invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function keypress(params) {
   const keys = Array.isArray(params.keys) ? params.keys : [];
   if (!keys.length) throw new Error("keys is required");
-  const modifierNames = new Set(["Alt", "Control", "Meta", "Shift"]);
+  const modifiersMap = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+  const modifierNames = new Set(Object.keys(modifiersMap));
   let modifiers = 0;
-  const bit = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
-  for (const key of keys) if (modifierNames.has(key)) modifiers |= bit[key];
+  for (const key of keys) if (modifierNames.has(key)) modifiers |= modifiersMap[key];
   const primary = keys.find((k) => !modifierNames.has(k)) || keys[keys.length - 1];
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: primary, modifiers });
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: primary, modifiers });
-  visualEpoch++;
+  invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function navigate(params) {
   if (!params.url) throw new Error("url is required");
   await send("Page.navigate", { url: params.url });
-  visualEpoch++;
+  invalidateVisualState();
   return { success: true, visualEpoch, url: params.url };
 }
 
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
-  return tabs.map((tab) => ({
-    targetId: String(tab.id),
-    windowId: tab.windowId,
-    active: tab.active,
-    title: tab.title || "",
-    url: tab.url || "",
-  }));
+  return tabs.map((tab) => ({ targetId: String(tab.id), windowId: tab.windowId, active: tab.active, title: tab.title || "", url: tab.url || "" }));
 }
 
 async function switchTab(params) {
@@ -212,9 +261,9 @@ async function handleRpc(request) {
     throw Object.assign(new Error("CONTROL_PAUSED"), { code: "CONTROL_PAUSED" });
   }
   switch (request.method) {
-    case "status":
-      return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN };
+    case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN };
     case "observe": return observe(request.params);
+    case "inspect_region": return inspectRegion(request.params || {});
     case "click": return mouseClick(request.params || {});
     case "scroll": return scroll(request.params || {});
     case "type": return typeText(request.params || {});
@@ -268,7 +317,7 @@ async function connectGateway() {
 chrome.debugger.onEvent.addListener((source, method) => {
   if (source.tabId !== attachedTabId) return;
   if (["Page.frameNavigated", "Page.navigatedWithinDocument", "Page.loadEventFired", "Page.javascriptDialogOpening"].includes(method)) {
-    visualEpoch++;
+    invalidateVisualState();
     setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
   }
 });
@@ -276,7 +325,7 @@ chrome.debugger.onEvent.addListener((source, method) => {
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
-    visualEpoch++;
+    invalidateVisualState();
     setStatus(socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
   }
 });
