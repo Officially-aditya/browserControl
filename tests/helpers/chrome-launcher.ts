@@ -12,6 +12,7 @@ export interface LaunchedChrome {
 }
 
 export function findChromePath(): string {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
   if (process.platform === "darwin") {
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   } else if (process.platform === "win32") {
