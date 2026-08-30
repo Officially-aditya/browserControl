@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import WebSocket from "ws";
 import { runRemoteGateway } from "../../src/remote/gateway.js";
 
@@ -84,18 +83,29 @@ describe("Remote web-control gateway", () => {
     }
   });
 
-  function createClient() {
-    const client = new Client({ name: "remote-gateway-test", version: "1.0.0" });
+  function createClient(clientId = crypto.randomUUID()) {
+    const client = new Client(
+      { name: "remote-gateway-test", version: "1.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } }
+    );
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
-      requestInit: { headers: { Authorization: "Bearer mcp-secret" } },
+      requestInit: {
+        headers: {
+          Authorization: "Bearer mcp-secret",
+          "X-BrowserControl-Client-Id": clientId,
+        },
+      },
     });
     return { client, transport };
   }
 
-  it("lists model-facing browser tools and returns screenshot image content", async () => {
+  it("negotiates MCP 2026-07-28, lists tools, and returns screenshot image content", async () => {
     const { client, transport } = createClient();
     try {
       await client.connect(transport);
+      expect(client.getProtocolEra()).toBe("modern");
+      expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
+
       const listed = await client.listTools();
       const names = listed.tools.map((tool) => tool.name);
       expect(names).toContain("browser_observe");
@@ -183,9 +193,9 @@ describe("Remote web-control gateway", () => {
     }
   });
 
-  it("enforces a single interactive control lease across MCP sessions", async () => {
-    const first = createClient();
-    const second = createClient();
+  it("enforces a single interactive control lease across modern stateless MCP clients", async () => {
+    const first = createClient("client-a");
+    const second = createClient("client-b");
     try {
       await first.client.connect(first.transport);
       await second.client.connect(second.transport);
