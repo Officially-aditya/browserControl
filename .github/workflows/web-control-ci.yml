@@ -55,5 +55,6 @@ jobs:
         env:
           BROWSERCONTROL_TEST_TLS_KEY: /tmp/browsercontrol-test-key.pem
           BROWSERCONTROL_TEST_TLS_CERT: /tmp/browsercontrol-test-cert.pem
+          BROWSERCONTROL_CHROME_CI_NO_SANDBOX: "1"
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: xvfb-run -a npx vitest run tests/integration/extension_gateway.integration.test.ts
