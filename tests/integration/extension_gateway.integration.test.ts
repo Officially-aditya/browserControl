@@ -82,21 +82,27 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     const worker = await findExtensionWorker(chrome.port);
-    const shareExpression = `chrome.runtime.sendMessage({type:"shareActiveTab"}).then(r => JSON.stringify(r))`;
+    const shareExpression = `chrome.runtime.sendMessage({type:"shareActiveTab"})`;
     const evaluated = await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: shareExpression,
       awaitPromise: true,
       returnByValue: true,
     });
-    const shareResult = JSON.parse(evaluated.result.value);
+    const rawShareResult = evaluated.result.value;
+    const shareResult = typeof rawShareResult === "string" ? JSON.parse(rawShareResult) : rawShareResult;
     expect(shareResult.ok).toBe(true);
 
     const deadline = Date.now() + 5000;
+    let extensionConnected = false;
     while (Date.now() < deadline) {
       const health = await fetch("http://127.0.0.1:8787/health").then((r) => r.json()) as any;
-      if (health.extensionConnected) break;
+      if (health.extensionConnected) {
+        extensionConnected = true;
+        break;
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    expect(extensionConnected).toBe(true);
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
     transport = new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8787/mcp"), {
