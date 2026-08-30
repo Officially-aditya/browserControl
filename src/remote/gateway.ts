@@ -1,13 +1,8 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  isInitializeRequest,
-} from "@modelcontextprotocol/sdk/types.js";
+import { createMcpHandler, Server } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 
 interface ExtensionRpcResponse {
   id: string;
@@ -266,27 +261,42 @@ function tools() {
     { name: "browser_new_tab", description: "Create a new tab and share it for control.", inputSchema: { type: "object", properties: { url: { type: "string", format: "uri" } }, additionalProperties: false } },
     { name: "browser_close_tab", description: "Close a tab. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object", properties: { targetId: { type: "string" } }, additionalProperties: false } },
     { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog.", inputSchema: { type: "object", properties: { accept: { type: "boolean" }, promptText: { type: "string" } }, required: ["accept"], additionalProperties: false } },
-    { name: "browser_release_control", description: "Release this MCP session's exclusive interactive-control lease.", inputSchema: EMPTY_SCHEMA },
+    { name: "browser_release_control", description: "Release this client's exclusive interactive-control lease.", inputSchema: EMPTY_SCHEMA },
   ];
 }
 
-async function createGatewayMcpServer(bridge: ExtensionBridge, lease: ControlLease, clientId: string): Promise<Server> {
-  const server = new Server({ name: "browser-control-remote", version: "0.3.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools() }));
+function requestClientId(requestInfo?: Request): string {
+  const explicit = requestInfo?.headers.get("x-browsercontrol-client-id")?.trim();
+  if (explicit) return `client:${explicit.slice(0, 160)}`;
+
+  const legacySession = requestInfo?.headers.get("mcp-session-id")?.trim();
+  if (legacySession) return `legacy-session:${legacySession.slice(0, 160)}`;
+
+  let principal = requestInfo?.headers.get("authorization") || "";
+  if (!principal && requestInfo) {
+    try { principal = new URL(requestInfo.url).searchParams.get("token") || ""; } catch {}
+  }
+  const digest = createHash("sha256").update(principal || "anonymous").digest("hex").slice(0, 32);
+  return `principal:${digest}`;
+}
+
+function createGatewayMcpServer(bridge: ExtensionBridge, lease: ControlLease, clientId: string): Server {
+  const server = new Server({ name: "browser-control-remote", version: "0.4.0" }, { capabilities: { tools: {} } });
+  server.setRequestHandler("tools/list", async () => ({ tools: tools() }));
 
   const mutate = async (method: string, params: Record<string, any>) => {
     if (!lease.acquire(clientId)) {
-      const error = new Error("Another AI session currently controls this browser. Try again after its lease expires or is released.");
+      const error = new Error("Another AI client currently controls this browser. Try again after its lease expires or is released.");
       (error as any).code = "DEVICE_BUSY";
       throw error;
     }
     return bridge.call(method, params);
   };
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const args = (request.params.arguments || {}) as Record<string, any>;
+  server.setRequestHandler("tools/call", async (request: any) => {
+    const args = (request.params?.arguments || {}) as Record<string, any>;
     try {
-      switch (request.params.name) {
+      switch (request.params?.name) {
         case "browser_status": {
           const extension = bridge.connected ? await bridge.call("status") : { connected: false };
           const currentLease = lease.status();
@@ -314,7 +324,7 @@ async function createGatewayMcpServer(bridge: ExtensionBridge, lease: ControlLea
           lease.release(clientId);
           return textResult({ success: true });
         default:
-          throw new Error(`Unknown tool: ${request.params.name}`);
+          throw new Error(`Unknown tool: ${request.params?.name}`);
       }
     } catch (error) {
       return toolError(error);
@@ -330,6 +340,7 @@ export interface RemoteGatewayOptions {
   extensionToken?: string;
   mcpBearerToken?: string;
   leaseTtlMs?: number;
+  maxMcpBodySize?: number;
 }
 
 export interface RemoteGatewayHandle {
@@ -342,9 +353,17 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const host = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
   const extensionToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
   const mcpBearerToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
+  const maxMcpBodySize = options.maxMcpBodySize ?? 2 * 1024 * 1024;
   const bridge = new ExtensionBridge();
   const lease = new ControlLease(options.leaseTtlMs ?? 60_000);
-  const transports = new Map<string, { transport: StreamableHTTPServerTransport; mcpServer: Server; clientId: string }>();
+
+  const mcpHandler = createMcpHandler(
+    ({ requestInfo }) => createGatewayMcpServer(bridge, lease, requestClientId(requestInfo)),
+    { legacy: "stateless" }
+  );
+  const nodeMcpHandler = toNodeHandler(mcpHandler, {
+    onerror: (error) => console.error("[browserControl] Remote MCP adapter error:", error),
+  });
 
   const authorizedMcpRequest = (req: http.IncomingMessage, url: URL) => {
     if (!mcpBearerToken) return true;
@@ -372,90 +391,19 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
       return;
     }
 
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-    if (req.method === "GET" || req.method === "DELETE") {
-      const entry = sessionId ? transports.get(sessionId) : undefined;
-      if (!entry) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Invalid or missing MCP session" }));
-        return;
-      }
-      void entry.transport.handleRequest(req, res).then(() => {
-        if (req.method === "DELETE") {
-          lease.release(entry.clientId);
-          transports.delete(sessionId!);
-        }
-      }).catch((error) => {
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: error?.message || String(error) }));
-        }
-      });
+    const contentLength = Number(req.headers["content-length"] || 0);
+    if (Number.isFinite(contentLength) && contentLength > maxMcpBodySize) {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Payload too large" }));
+      req.resume();
       return;
     }
 
-    if (req.method !== "POST") {
-      res.writeHead(405).end();
-      return;
-    }
+    void nodeMcpHandler(req, res);
+  });
 
-    let raw = "";
-    let tooLarge = false;
-    req.on("data", (chunk) => {
-      if (tooLarge) return;
-      raw += chunk;
-      if (Buffer.byteLength(raw) > 2 * 1024 * 1024) {
-        tooLarge = true;
-        res.writeHead(413, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Payload too large" }));
-        req.resume();
-      }
-    });
-
-    req.on("end", () => {
-      if (tooLarge) return;
-      void (async () => {
-        const body = raw ? JSON.parse(raw) : undefined;
-        if (sessionId) {
-          const entry = transports.get(sessionId);
-          if (!entry) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Unknown MCP session" }));
-            return;
-          }
-          await entry.transport.handleRequest(req, res, body);
-          return;
-        }
-
-        if (!isInitializeRequest(body)) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Expected MCP initialize request" }));
-          return;
-        }
-
-        const clientId = randomUUID();
-        const mcpServer = await createGatewayMcpServer(bridge, lease, clientId);
-        let transport!: StreamableHTTPServerTransport;
-        transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (sid) => {
-            transports.set(sid, { transport, mcpServer, clientId });
-          },
-        });
-        transport.onclose = () => {
-          lease.release(clientId);
-          if (transport.sessionId) transports.delete(transport.sessionId);
-        };
-        await mcpServer.connect(transport);
-        await transport.handleRequest(req, res, body);
-      })().catch((error: any) => {
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: error?.message || String(error) }));
-        }
-      });
-    });
+  httpServer.once("close", () => {
+    void mcpHandler.close();
   });
 
   const wss = new WebSocketServer({ noServer: true });
