@@ -33,21 +33,18 @@ async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise
   }
 }
 
-async function findExtensionWorker(port: number): Promise<{ url: string; webSocketDebuggerUrl: string }> {
+async function listTargets(port: number): Promise<any[]> {
+  return fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json()) as Promise<any[]>;
+}
+
+async function waitForTarget(port: number, predicate: (target: any) => boolean, label: string): Promise<any> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json()) as any[];
-    const worker = targets.find(
-      (target) =>
-        (target.type === "service_worker" || target.type === "background_page") &&
-        typeof target.url === "string" &&
-        target.url.startsWith("chrome-extension://") &&
-        target.webSocketDebuggerUrl
-    );
-    if (worker) return worker;
+    const target = (await listTargets(port)).find(predicate);
+    if (target?.webSocketDebuggerUrl) return target;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("browserControl extension service worker was not exposed by Chrome DevTools");
+  throw new Error(`Timed out waiting for ${label}`);
 }
 
 describe("Real Chrome extension -> gateway -> MCP canary", () => {
@@ -70,6 +67,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     const extensionDir = path.resolve(process.cwd(), "extension");
     chrome = await launchRealChrome({
       windowSize: "1280,800",
+      headless: false,
       extraArgs: [
         `--disable-extensions-except=${extensionDir}`,
         `--load-extension=${extensionDir}`,
@@ -81,12 +79,34 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     await controller.executeBrowserAction({ type: "navigate", url: `${fixture.url}/interactive.html` });
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    const worker = await findExtensionWorker(chrome.port);
-    await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
+    const worker = await waitForTarget(
+      chrome.port,
+      (target) =>
+        (target.type === "service_worker" || target.type === "background_page") &&
+        typeof target.url === "string" &&
+        target.url.startsWith("chrome-extension://"),
+      "browserControl extension service worker"
+    );
+    const extensionId = new URL(worker.url).host;
+    const popupUrl = `chrome-extension://${extensionId}/popup.html`;
+
+    const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", {
+      url: popupUrl,
+      background: true,
+    });
+    const popup = await waitForTarget(
+      chrome.port,
+      (target) => target.url === popupUrl,
+      "browserControl popup target"
+    );
+    const shareEvaluation = await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
       awaitPromise: true,
       returnByValue: true,
     });
+    const shareResult = shareEvaluation.result.value;
+    expect(shareResult?.ok).toBe(true);
+    await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     const deadline = Date.now() + 5000;
     let extensionConnected = false;
