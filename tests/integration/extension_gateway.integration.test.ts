@@ -53,17 +53,11 @@ async function extensionDiagnostics(port: number): Promise<any> {
       "extension worker diagnostics"
     );
     const evaluated = await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `(async () => ({
-        webSocketType: typeof WebSocket,
-        socketReadyState: typeof socket !== "undefined" && socket ? socket.readyState : null,
-        manualDisconnect: typeof manualDisconnect !== "undefined" ? manualDisconnect : null,
-        config: typeof getConfig === "function" ? await getConfig() : null,
-        stored: await chrome.storage.local.get(null)
-      }))()`,
+      expression: `chrome.storage.local.get(null)`,
       awaitPromise: true,
       returnByValue: true,
     });
-    return evaluated.result?.value ?? evaluated;
+    return { storage: evaluated.result?.value, exceptionDetails: evaluated.exceptionDetails };
   } catch (error: any) {
     return { diagnosticError: error?.message || String(error) };
   }
@@ -116,6 +110,20 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
 
     const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", { url: popupUrl, background: true });
     const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "browserControl popup target");
+
+    const probe = await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
+      expression: `new Promise((resolve) => {
+        const probeSocket = new WebSocket("ws://127.0.0.1:8787/extension");
+        const timer = setTimeout(() => resolve({ok:false, timeout:true, readyState:probeSocket.readyState}), 3000);
+        probeSocket.onopen = () => { clearTimeout(timer); probeSocket.close(1000, "probe"); resolve({ok:true}); };
+        probeSocket.onerror = () => { clearTimeout(timer); resolve({ok:false, error:true, readyState:probeSocket.readyState}); };
+      })`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (!probe.result?.value?.ok) {
+      throw new Error(`Extension-page WebSocket probe failed: ${JSON.stringify(probe)}`);
+    }
 
     await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"ws://127.0.0.1:8787/extension",deviceToken:"",autoReconnect:true}})`,
