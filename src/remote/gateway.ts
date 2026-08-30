@@ -439,7 +439,9 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         let transport!: StreamableHTTPServerTransport;
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (sid) => transports.set(sid, { transport, mcpServer, clientId }),
+          onsessioninitialized: (sid) => {
+            transports.set(sid, { transport, mcpServer, clientId });
+          },
         });
         transport.onclose = () => {
           lease.release(clientId);
