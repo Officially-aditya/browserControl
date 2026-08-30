@@ -74,6 +74,18 @@ export class CliSession {
         return await this.controller.executeBrowserAction({ type: "navigate", url });
       }
 
+      case "back": {
+        return await this.controller.executeBrowserAction({ type: "back" });
+      }
+
+      case "forward": {
+        return await this.controller.executeBrowserAction({ type: "forward" });
+      }
+
+      case "reload": {
+        return await this.controller.executeBrowserAction({ type: "reload" });
+      }
+
       case "observe": {
         const obs = await this.controller.observe({ showCursor: true });
         this.lastObservationId = obs.observationId;
@@ -324,6 +336,9 @@ export class CliSession {
             "connect [port] [host]",
             "doctor",
             "nav <url>",
+            "back",
+            "forward",
+            "reload",
             "observe [filepath]",
             "click <x> <y> [button]",
             "dblclick <x> <y> [button]",
@@ -334,11 +349,20 @@ export class CliSession {
             "drag <x1,y1> <x2,y2> ...",
             "type <text>",
             "keypress <key1> [key2]",
-            "keydown <key> / keyup <key>",
+            "keydown <key>",
+            "keyup <key>",
             "reset-input",
-            "tabs / tab <targetId> / newtab [url] / closetab [targetId]",
-            "windows / newwindow [url] / closewindow <windowId>",
-            "dialog / dialog-accept [promptText] / dialog-dismiss",
+            "tabs",
+            "tab <targetId>",
+            "newtab [url]",
+            "closetab [targetId]",
+            "windows",
+            "newwindow [url]",
+            "closewindow <windowId>",
+            "dialog",
+            "dialog-accept [promptText]",
+            "dialog-dismiss",
+            "help",
             "exit",
           ],
         };

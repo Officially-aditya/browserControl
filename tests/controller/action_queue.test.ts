@@ -240,5 +240,194 @@ describe("ActionQueue & Cancellation Architecture", () => {
     // Only the pre-abort step(s) should exist
     expect(dispatchedEvents.length).toBeLessThanOrEqual(2);
   });
+
+  it("should support natural drain() awaiting all pending and active tasks", async () => {
+    const queue = new ActionQueue();
+    const completed: number[] = [];
+
+    queue.run(async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      completed.push(1);
+    });
+
+    queue.run(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      completed.push(2);
+    });
+
+    expect(queue.isRunning).toBe(true);
+    expect(queue.pendingCount).toBe(1); // 1 in queue, 1 currently running
+
+    await queue.drain();
+
+    expect(completed).toEqual([1, 2]);
+    expect(queue.isRunning).toBe(false);
+    expect(queue.pendingCount).toBe(0);
+  });
+
+  it("should support cancelAndDrain() awaiting in-flight task termination before resolving", async () => {
+    const queue = new ActionQueue();
+    let taskCleanedUp = false;
+
+    const longTask = queue.run(async (signal) => {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 500);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          setTimeout(() => {
+            taskCleanedUp = true;
+            resolve("aborted");
+          }, 30);
+        });
+      });
+      if (signal.aborted) {
+        throw { errorCode: "ACTION_CANCELLED", message: "aborted" };
+      }
+    });
+
+    const queuedTask = queue.run(async () => "queued");
+
+    const longTaskPromise = longTask.catch((err) => err);
+    const queuedTaskPromise = queuedTask.catch((err) => err);
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    // cancelAndDrain must wait for in-flight task's async cleanup to finish
+    await queue.cancelAndDrain();
+
+    expect(taskCleanedUp).toBe(true);
+    expect(queue.isRunning).toBe(false);
+    expect(queue.pendingCount).toBe(0);
+
+    const res1 = await longTaskPromise;
+    const res2 = await queuedTaskPromise;
+    expect(res1.errorCode).toBe("ACTION_CANCELLED");
+    expect(res2.errorCode).toBe("ACTION_CANCELLED");
+  });
+
+  it("should isolate generation so orphaned finally blocks do not corrupt next generation processing", async () => {
+    const queue = new ActionQueue();
+    let orphanedTaskFinished = false;
+
+    // Task 1 will be aborted mid-flight and take 80ms to finish its finally block
+    queue.run(async (signal) => {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 500);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          setTimeout(() => {
+            orphanedTaskFinished = true;
+            resolve("done");
+          }, 80);
+        });
+      });
+      throw { errorCode: "ACTION_CANCELLED" };
+    }).catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Reset queue (creates generation 2)
+    await queue.reset();
+
+    // Run Task 2 in generation 2 immediately
+    const resTask2 = await queue.run(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return "gen2_result";
+    });
+
+    expect(resTask2).toBe("gen2_result");
+
+    // Wait for Task 1's orphaned cleanup to finish
+    await new Promise((r) => setTimeout(r, 100));
+    expect(orphanedTaskFinished).toBe(true);
+
+    // Run Task 3 to verify queue is still fully functional and not locked
+    const resTask3 = await queue.run(async () => "gen2_subsequent");
+    expect(resTask3).toBe("gen2_subsequent");
+  });
+
+  it("should enforce stop/disconnect cancellation ordering (cancelAndDrain precedes input reset)", async () => {
+    const executionEvents: string[] = [];
+
+    const mockController: any = {
+      actionQueue: new ActionQueue(),
+      inputState: {
+        pressedKeys: new Set(["Shift"]),
+        pressedButtons: new Set(["left"]),
+      },
+      resetInputState: vi.fn().mockImplementation(async () => {
+        executionEvents.push("resetInputState");
+      }),
+      observationStore: {
+        clear: vi.fn().mockImplementation(() => {
+          executionEvents.push("observationStore.clear");
+        }),
+      },
+      session: {
+        stop: vi.fn().mockImplementation(async () => {
+          executionEvents.push("session.stop");
+        }),
+        detach: vi.fn().mockImplementation(async () => {
+          executionEvents.push("session.detach");
+        }),
+      },
+      connection: {
+        close: vi.fn().mockImplementation(async () => {
+          executionEvents.push("connection.close");
+        }),
+      },
+    };
+
+    // Bind real stop/disconnect logic
+    mockController.stop = async function () {
+      await this.actionQueue.cancelAndDrain();
+      executionEvents.push("actionQueue.cancelAndDrain");
+      await this.resetInputState();
+      this.observationStore.clear();
+      await this.session.stop();
+    };
+
+    mockController.disconnect = async function () {
+      await this.actionQueue.cancelAndDrain();
+      executionEvents.push("actionQueue.cancelAndDrain");
+      await this.resetInputState();
+      this.observationStore.clear();
+      await this.session.detach();
+      await this.connection.close();
+    };
+
+    // Run in-flight task
+    const runningTask = mockController.actionQueue.run(async (signal: AbortSignal) => {
+      await new Promise((resolve) => {
+        signal.addEventListener("abort", () => {
+          executionEvents.push("task.abortSignalReceived");
+          resolve("aborted");
+        });
+      });
+      throw { errorCode: "ACTION_CANCELLED" };
+    });
+    runningTask.catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Call stop()
+    await mockController.stop();
+
+    // Verify exact ordering:
+    // 1. Task receives abort signal and completes in-flight unwinding
+    // 2. actionQueue.cancelAndDrain completes
+    // 3. resetInputState runs
+    // 4. observationStore.clear runs
+    // 5. session.stop runs
+    expect(executionEvents).toEqual([
+      "task.abortSignalReceived",
+      "actionQueue.cancelAndDrain",
+      "resetInputState",
+      "observationStore.clear",
+      "session.stop",
+    ]);
+  });
 });
+
+
 

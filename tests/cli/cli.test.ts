@@ -52,11 +52,26 @@ describe("CLI REPL & Command Handlers Suite", () => {
     expect(res.connected).toBe(true);
   });
 
-  it("should handle nav command", async () => {
+  it("should handle nav, back, forward, and reload navigation commands", async () => {
     await cli.handleCommand("nav https://google.com");
     expect(mockController.executeBrowserAction).toHaveBeenCalledWith({
       type: "navigate",
       url: "https://google.com",
+    });
+
+    await cli.handleCommand("back");
+    expect(mockController.executeBrowserAction).toHaveBeenCalledWith({
+      type: "back",
+    });
+
+    await cli.handleCommand("forward");
+    expect(mockController.executeBrowserAction).toHaveBeenCalledWith({
+      type: "forward",
+    });
+
+    await cli.handleCommand("reload");
+    expect(mockController.executeBrowserAction).toHaveBeenCalledWith({
+      type: "reload",
     });
   });
 

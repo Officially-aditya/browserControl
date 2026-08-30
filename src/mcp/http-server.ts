@@ -32,6 +32,29 @@ function safeTokenCompare(provided: string, expected: string): boolean {
   }
 }
 
+export function extractHostname(rawHost: string): string {
+  const trimmed = rawHost.trim();
+  if (!trimmed) return "";
+
+  // 1. Bracketed IPv6 format: e.g. "[::1]:8080", "[::1]", "[fe80::1]:3000", "[2001:db8::1]"
+  if (trimmed.startsWith("[")) {
+    const closingBracket = trimmed.indexOf("]");
+    if (closingBracket !== -1) {
+      return trimmed.slice(1, closingBracket).toLowerCase();
+    }
+  }
+
+  // 2. IPv4 or domain name with optional port: e.g. "127.0.0.1:8080", "localhost:3000", "example.com:90"
+  const colons = trimmed.split(":");
+  if (colons.length === 2) {
+    // Single colon means host:port
+    return colons[0].toLowerCase();
+  }
+
+  // Multiple colons (unbracketed raw IPv6 e.g. "::1", "fe80::1") or no colon ("localhost", "127.0.0.1")
+  return trimmed.toLowerCase();
+}
+
 export async function runHttpMcpServer(
   port = Number(process.env.MCP_HTTP_PORT || 8765),
   host = process.env.MCP_HTTP_HOST || "127.0.0.1",
@@ -55,7 +78,12 @@ export async function runHttpMcpServer(
   }
 
   // 2. Loopback Enforcement & Host validation list
-  const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  const normalizedHost = extractHostname(host);
+  const isLoopback =
+    normalizedHost === "127.0.0.1" ||
+    normalizedHost === "localhost" ||
+    normalizedHost === "::1" ||
+    normalizedHost === "::";
   if (!isLoopback) {
     console.warn(`[MCP-HTTP] Security Warning: Binding to non-loopback host (${host}). Ensure firewall rules are applied.`);
   }
@@ -64,9 +92,13 @@ export async function runHttpMcpServer(
     "127.0.0.1",
     "localhost",
     "::1",
-    host.toLowerCase(),
-    ...(securityOptions.allowedHosts || []).map((h) => h.toLowerCase()),
-    ...(process.env.MCP_ALLOWED_HOSTS ? process.env.MCP_ALLOWED_HOSTS.split(",").map((h) => h.trim().toLowerCase()) : []),
+    "[::1]",
+    "::",
+    "[::]",
+    normalizedHost,
+    `[${normalizedHost}]`,
+    ...(securityOptions.allowedHosts || []).map((h) => extractHostname(h)),
+    ...(process.env.MCP_ALLOWED_HOSTS ? process.env.MCP_ALLOWED_HOSTS.split(",").map((h) => extractHostname(h.trim())) : []),
   ]);
 
   // 3. CORS Configuration
@@ -104,9 +136,9 @@ export async function runHttpMcpServer(
     // A. Host Header Validation (DNS Rebinding Protection)
     // -------------------------------------------------------------------------
     const rawHostHeader = req.headers["host"] || "";
-    const hostname = rawHostHeader.split(":")[0].toLowerCase();
+    const hostname = extractHostname(rawHostHeader);
 
-    if (!hostname || !allowedHostsSet.has(hostname)) {
+    if (!hostname || (!allowedHostsSet.has(hostname) && !allowedHostsSet.has(`[${hostname}]`))) {
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Forbidden: Invalid or unrecognized Host header" }));
       return;
@@ -154,7 +186,7 @@ export async function runHttpMcpServer(
       }
     }
 
-    const url = new URL(req.url || "/", `http://${rawHostHeader || "localhost"}`);
+    const url = new URL(req.url || "/", "http://127.0.0.1");
 
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -197,6 +229,20 @@ export async function runHttpMcpServer(
       }
 
       if (req.method === "POST") {
+        const contentLengthHeader = req.headers["content-length"];
+        if (contentLengthHeader) {
+          const contentLength = parseInt(contentLengthHeader, 10);
+          if (!isNaN(contentLength) && contentLength > maxBodySizeBytes) {
+            res.writeHead(413, {
+              "Content-Type": "application/json",
+              "Connection": "close",
+            });
+            res.end(JSON.stringify({ error: "Payload Too Large: Request body exceeds maximum allowed size" }));
+            req.resume();
+            return;
+          }
+        }
+
         let body = "";
         let bodySize = 0;
         let limitExceeded = false;
@@ -207,9 +253,12 @@ export async function runHttpMcpServer(
 
           if (bodySize > maxBodySizeBytes) {
             limitExceeded = true;
-            res.writeHead(413, { "Content-Type": "application/json" });
+            res.writeHead(413, {
+              "Content-Type": "application/json",
+              "Connection": "close",
+            });
             res.end(JSON.stringify({ error: "Payload Too Large: Request body exceeds maximum allowed size" }));
-            req.destroy();
+            req.resume();
             return;
           }
           body += chunk;

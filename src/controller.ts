@@ -38,9 +38,19 @@ interface QueueEntry<T = any> {
 export class ActionQueue {
   private queue: QueueEntry[] = [];
   private currentEntry: QueueEntry | null = null;
+  private inFlightPromise: Promise<void> | null = null;
   private isProcessing = false;
   private isAborted = false;
   private generation = 0;
+  private drainListeners: Array<() => void> = [];
+
+  public get pendingCount(): number {
+    return this.queue.length;
+  }
+
+  public get isRunning(): boolean {
+    return this.isProcessing || this.currentEntry !== null || this.inFlightPromise !== null;
+  }
 
   public async run<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.isAborted) {
@@ -69,6 +79,7 @@ export class ActionQueue {
 
   private async processNext(): Promise<void> {
     if (this.isProcessing || this.queue.length === 0 || this.isAborted) {
+      this.checkDrain();
       return;
     }
 
@@ -76,6 +87,7 @@ export class ActionQueue {
     const entry = this.queue.shift();
     if (!entry) {
       this.isProcessing = false;
+      this.checkDrain();
       return;
     }
 
@@ -93,30 +105,55 @@ export class ActionQueue {
     }
 
     this.currentEntry = entry;
-    try {
-      const result = await entry.task(entry.abortController.signal);
-      if (entry.generation === this.generation && !this.isAborted && !entry.settled) {
-        entry.settled = true;
-        entry.resolve(result);
-      } else if (!entry.settled) {
-        entry.settled = true;
-        entry.reject({
-          errorCode: "ACTION_CANCELLED",
-          message: "Action cancelled: queue was aborted during execution",
-        });
+    const runGeneration = entry.generation;
+
+    const taskExecution = (async () => {
+      try {
+        const result = await entry.task(entry.abortController.signal);
+        if (entry.generation === this.generation && !this.isAborted && !entry.settled) {
+          entry.settled = true;
+          entry.resolve(result);
+        } else if (!entry.settled) {
+          entry.settled = true;
+          entry.reject({
+            errorCode: "ACTION_CANCELLED",
+            message: "Action cancelled: queue was aborted during execution",
+          });
+        }
+      } catch (err) {
+        if (!entry.settled) {
+          entry.settled = true;
+          entry.reject(err);
+        }
+      } finally {
+        if (this.generation === runGeneration) {
+          this.currentEntry = null;
+          this.isProcessing = false;
+          this.inFlightPromise = null;
+          this.processNext();
+        } else {
+          this.inFlightPromise = null;
+          this.checkDrain();
+        }
       }
-    } catch (err) {
-      if (!entry.settled) {
-        entry.settled = true;
-        entry.reject(err);
+    })();
+
+    this.inFlightPromise = taskExecution;
+  }
+
+  private checkDrain(): void {
+    if (!this.isRunning && this.queue.length === 0) {
+      const listeners = [...this.drainListeners];
+      this.drainListeners = [];
+      for (const fn of listeners) {
+        fn();
       }
-    } finally {
-      this.currentEntry = null;
-      this.isProcessing = false;
-      this.processNext();
     }
   }
 
+  /**
+   * Cancel the currently executing task (via AbortSignal) and immediately drain/reject all pending queued tasks.
+   */
   public abort(): void {
     this.isAborted = true;
     this.generation++;
@@ -148,13 +185,45 @@ export class ActionQueue {
     }
 
     this.isProcessing = false;
+    this.checkDrain();
   }
 
+  /**
+   * Wait for all queued and in-flight actions to complete naturally without aborting.
+   */
+  public async drain(): Promise<void> {
+    if (!this.isRunning && this.queue.length === 0) {
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.drainListeners.push(resolve);
+    });
+  }
+
+  /**
+   * Aborts all pending and active tasks, and waits for in-flight asynchronous operations to fully settle.
+   */
+  public async cancelAndDrain(): Promise<void> {
+    const currentFlight = this.inFlightPromise;
+    this.abort();
+    if (currentFlight) {
+      try {
+        await currentFlight;
+      } catch {}
+    }
+    this.inFlightPromise = null;
+    this.checkDrain();
+  }
+
+  /**
+   * Reset the queue to an idle, non-aborted state.
+   */
   public reset(): void {
     this.abort();
     this.isAborted = false;
     this.generation++;
     this.queue = [];
+    this.currentEntry = null;
     this.isProcessing = false;
   }
 }
@@ -225,7 +294,7 @@ export class ChromeController {
    * Connect to Chrome and attach to the initial tab
    */
   public async connect(targetId?: string): Promise<void> {
-    this.actionQueue.reset();
+    await this.actionQueue.reset();
     await this.connection.connect();
     await this.targetManager.init();
 
@@ -247,8 +316,8 @@ export class ChromeController {
    * Disconnect from Chrome
    */
   public async disconnect(): Promise<void> {
+    await this.actionQueue.cancelAndDrain();
     await this.resetInputState();
-    this.actionQueue.abort();
     this.observationStore.clear();
     await this.session.detach();
     await this.connection.close();
@@ -807,8 +876,8 @@ export class ChromeController {
   }
 
   public async stop(): Promise<void> {
+    await this.actionQueue.cancelAndDrain();
     await this.resetInputState();
-    this.actionQueue.abort();
     this.observationStore.clear();
     await this.session.stop();
   }

@@ -132,8 +132,63 @@ export async function createMcpServer(controller: ChromeController): Promise<Ser
     };
   });
 
+  let connectingPromise: Promise<void> | null = null;
+
+  async function ensureControllerConnected(): Promise<void> {
+    if (controller.isConnected && controller.session.sessionId) {
+      return;
+    }
+    if (!connectingPromise) {
+      connectingPromise = (async () => {
+        try {
+          await controller.connect();
+        } finally {
+          connectingPromise = null;
+        }
+      })();
+    }
+    return connectingPromise;
+  }
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    if (name === "doctor") {
+      try {
+        await ensureControllerConnected();
+      } catch {}
+      const diagnostic = await controller.doctor();
+      return {
+        content: [{ type: "text", text: JSON.stringify(diagnostic, null, 2) }],
+      };
+    }
+
+    try {
+      await ensureControllerConnected();
+    } catch (err: any) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: false,
+                errorCode: "CONNECTION_FAILED",
+                message: `Failed to connect to Chrome: ${err.message}. Ensure Chrome is running with remote debugging enabled.`,
+                troubleshooting: [
+                  "1. If Chrome is running, open chrome://inspect/#remote-debugging in Chrome and ensure remote debugging is enabled.",
+                  "2. Or launch Chrome with: --remote-debugging-port=9222",
+                  "3. Or pass explicit endpoint with CHROME_BROWSER_URL=http://127.0.0.1:9222 or CHROME_WS_ENDPOINT=ws://...",
+                ],
+              },
+              null,
+              2
+            ),
+          },
+        ],
+        isError: true,
+      };
+    }
 
     if (name === "observe") {
       const obs = await controller.observe(args as any);
@@ -182,13 +237,6 @@ export async function createMcpServer(controller: ChromeController): Promise<Ser
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         isError: !result.success,
-      };
-    }
-
-    if (name === "doctor") {
-      const diagnostic = await controller.doctor();
-      return {
-        content: [{ type: "text", text: JSON.stringify(diagnostic, null, 2) }],
       };
     }
 

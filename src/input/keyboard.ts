@@ -149,6 +149,7 @@ export class KeyboardController {
       key: keyStr,
       code: keyStr,
       windowsVirtualKeyCode: 0,
+      text: keyStr,
     };
   }
 
@@ -293,11 +294,12 @@ export class KeyboardController {
       return;
     }
 
+    const chars = Array.from(text);
+
     if (method === "key_events") {
-      for (let i = 0; i < text.length; i++) {
+      for (const char of chars) {
         if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
-        const char = text[i];
         if (char === "\n") {
           await this.keypress(["Enter"], signal);
         } else if (char === "\t") {
@@ -335,7 +337,7 @@ export class KeyboardController {
           });
         }
 
-        if (text.length > 1) {
+        if (chars.length > 1) {
           await new Promise((r) => setTimeout(r, 8));
         }
       }
@@ -344,9 +346,8 @@ export class KeyboardController {
 
     // Default "auto": dispatches keydown events + insertText to guarantee compatibility
     // with both DOM inputs (input/textarea/contenteditable) and canvas listeners
-    for (let i = 0; i < text.length; i++) {
+    for (const char of chars) {
       if (signal?.aborted) throw new Error("ACTION_CANCELLED");
-      const char = text[i];
 
       if (char === "\n") {
         await this.keypress(["Enter"], signal);
@@ -381,7 +382,7 @@ export class KeyboardController {
         });
       }
 
-      if (text.length > 1) {
+      if (chars.length > 1) {
         await new Promise((r) => setTimeout(r, 6));
       }
     }

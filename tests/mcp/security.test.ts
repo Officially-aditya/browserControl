@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { runHttpMcpServer } from "../../src/mcp/http-server.js";
+import { runHttpMcpServer, extractHostname } from "../../src/mcp/http-server.js";
 
 describe("MCP HTTP Security Hardening Suite", () => {
   let mcpInstance: { server: http.Server; transports: Record<string, any>; authToken: string };
@@ -112,7 +112,7 @@ describe("MCP HTTP Security Hardening Suite", () => {
       expect(res.body).toContain("Forbidden: Invalid or unrecognized Host header");
     });
 
-    it("should allow valid loopback Host headers (127.0.0.1 and localhost)", async () => {
+    it("should allow valid loopback Host headers (127.0.0.1, localhost, [::1], and ::1)", async () => {
       const res1 = await makeRequest({
         method: "GET",
         path: "/health",
@@ -132,6 +132,52 @@ describe("MCP HTTP Security Hardening Suite", () => {
         },
       });
       expect(res2.status).toBe(200);
+
+      // Bracketed IPv6 with port
+      const res3 = await makeRequest({
+        method: "GET",
+        path: "/health",
+        headers: {
+          Host: `[::1]:${port}`,
+          Authorization: `Bearer ${mcpInstance.authToken}`,
+        },
+      });
+      expect(res3.status).toBe(200);
+
+      // Bracketed IPv6 without port
+      const res4 = await makeRequest({
+        method: "GET",
+        path: "/health",
+        headers: {
+          Host: "[::1]",
+          Authorization: `Bearer ${mcpInstance.authToken}`,
+        },
+      });
+      expect(res4.status).toBe(200);
+
+      // Raw unbracketed IPv6
+      const res5 = await makeRequest({
+        method: "GET",
+        path: "/health",
+        headers: {
+          Host: "::1",
+          Authorization: `Bearer ${mcpInstance.authToken}`,
+        },
+      });
+      expect(res5.status).toBe(200);
+    });
+
+    it("should correctly parse and normalize various IPv6, IPv4, and domain Host headers with extractHostname", () => {
+      expect(extractHostname("127.0.0.1:8080")).toBe("127.0.0.1");
+      expect(extractHostname("127.0.0.1")).toBe("127.0.0.1");
+      expect(extractHostname("localhost:3000")).toBe("localhost");
+      expect(extractHostname("localhost")).toBe("localhost");
+      expect(extractHostname("[::1]:8080")).toBe("::1");
+      expect(extractHostname("[::1]")).toBe("::1");
+      expect(extractHostname("::1")).toBe("::1");
+      expect(extractHostname("[fe80::1]:9000")).toBe("fe80::1");
+      expect(extractHostname("[2001:db8::1]")).toBe("2001:db8::1");
+      expect(extractHostname("api.internal.corp:443")).toBe("api.internal.corp");
     });
   });
 
@@ -220,7 +266,7 @@ describe("MCP HTTP Security Hardening Suite", () => {
       const oversizedPayload = JSON.stringify({
         jsonrpc: "2.0",
         method: "test",
-        params: { data: "x".repeat(2048) }, // 2 KB exceeds 1 KB limit
+        params: { data: "x".repeat(2048) }, // 2 KB exceeds the configured 1 KB limit
         id: 1,
       });
 
@@ -231,11 +277,14 @@ describe("MCP HTTP Security Hardening Suite", () => {
           Host: `127.0.0.1:${port}`,
           Authorization: `Bearer ${mcpInstance.authToken}`,
           "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(oversizedPayload).toString(),
         },
         body: oversizedPayload,
-      }).catch((err) => ({ status: 413, headers: {}, body: err.message }));
+      });
 
       expect(res.status).toBe(413);
+      const parsedBody = JSON.parse(res.body);
+      expect(parsedBody.error).toContain("Payload Too Large");
     });
   });
 });

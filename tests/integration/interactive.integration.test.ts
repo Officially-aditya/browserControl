@@ -435,4 +435,42 @@ describe("Live Chrome Granular Input Verification", () => {
     });
     expect(valB.result.value).toBe("SourceClipboardText");
   });
+
+  it("13. unicode, international script, and emoji typing", async () => {
+    const inputBPos = await controller.session.send<{ result: { value: { x: number; y: number } } }>(
+      "Runtime.evaluate",
+      {
+        expression: "(() => { const r = document.getElementById('input-b').getBoundingClientRect(); return { x: r.left + r.width/2, y: r.top + r.height/2 }; })()",
+        returnByValue: true,
+      }
+    );
+
+    // Clear input B
+    await controller.session.send("Runtime.evaluate", {
+      expression: "document.getElementById('input-b').value = ''",
+    });
+
+    const obs = await controller.observe();
+    await controller.executeComputerAction({
+      type: "click",
+      observationId: obs.observationId,
+      x: inputBPos.result.value.x,
+      y: inputBPos.result.value.y,
+    });
+
+    const unicodeString = "🚀 AI Agent: 你好, مرحبا, café, €50 🎉";
+    const typeRes = await controller.executeComputerAction({
+      type: "type",
+      text: unicodeString,
+      method: "auto",
+    });
+    expect(typeRes.success).toBe(true);
+
+    const val = await controller.session.send<{ result: { value: string } }>("Runtime.evaluate", {
+      expression: "document.getElementById('input-b').value",
+      returnByValue: true,
+    });
+    expect(val.result.value).toBe(unicodeString);
+  });
 });
+

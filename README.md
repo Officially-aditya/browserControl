@@ -20,9 +20,9 @@ Repeat
 - **Connects to Existing Chrome**: Re-uses the user's running Chrome session, cookies, logins, profile, and tabs via Chrome 144+ remote debugging (`chrome://inspect/#remote-debugging`).
 - **Direct CDP Transport**: Pure WebSocket communication over Chrome DevTools Protocol with zero heavy automation wrappers.
 - **Deterministic Coordinate Normalization**: Encoded screenshots are decoded at the binary header level to determine real dimensions (`actualScreenshotWidth`, `actualScreenshotHeight`, `scaleX`, `scaleY`), ensuring $\Delta x, \Delta y \le 2$ CSS px error on real Chrome across DPR 1, DPR 2, and zoom levels.
-- **Observation Guardrails**: Every screenshot yields an `observationId`. Actions planned against stale observations (e.g. after page navigation or tab switches) are rejected with `STALE_OBSERVATION` to prevent invalid coordinate clicks. Wildly out-of-bounds coordinates are rejected with `OUT_OF_BOUNDS`.
-- **Action Serialization**: Actions are queued and executed serially per target to eliminate race conditions.
-- **Dual MCP Transports**: Standard Stdio transport for local AI agents + Streamable HTTP transport for remote/tunneled environments.
+- **Observation Guardrails**: Every screenshot yields an `observationId` and `visualEpoch`. Actions planned against stale observations (after page navigation, tab switches, or in-page SPA routing) are rejected with `STALE_OBSERVATION` to prevent invalid coordinate clicks. Wildly out-of-bounds coordinates are rejected with `OUT_OF_BOUNDS`.
+- **Action Serialization & Cancellation**: Actions are queued serially per target (`ActionQueue`) with strict cancel-and-drain semantics and AbortSignal propagation.
+- **Dual MCP Transports**: Standard Stdio transport for local AI agents + hardened Streamable HTTP transport for remote/tunneled environments with lazy reconnection and security sandboxing.
 
 ---
 
@@ -36,7 +36,6 @@ Repeat
 
 ### Installation & Build
 ```bash
-cd /Users/addy/Downloads/browser/chrome-computer-use
 npm install
 npm run build
 ```
@@ -47,20 +46,22 @@ npm run build
 
 The bridge supports 3 connection modes:
 
-1. **`auto`** (`--auto-connect`):
+1. **`auto`** (`CHROME_CONNECT_MODE=auto`):
    Automatically discovers active Chrome 144+ sessions by inspecting `DevToolsActivePort` across macOS, Linux, and Windows user-data paths, falling back to probing standard debugging ports.
    ```bash
-   npm run cli -- auto-connect
+   npm run cli
+   # Inside CLI: auto-connect
    ```
 
-2. **`browser-url`** (`--browser-url <url>`):
-   Connects to an explicit HTTP debugging port (e.g. `http://127.0.0.1:9222`).
+2. **`browser-url`** (`CHROME_BROWSER_URL=http://127.0.0.1:9222`):
+   Connects to an explicit HTTP debugging port.
    ```bash
-   npm run cli -- connect 9222 127.0.0.1
+   npm run cli
+   # Inside CLI: connect 9222 127.0.0.1
    ```
 
-3. **`ws-endpoint`** (`--ws-endpoint <url>`):
-   Connects directly to a specific Chrome WebSocket debugger URL (`ws://...`).
+3. **`ws-endpoint`** (`CHROME_WS_ENDPOINT=ws://...`):
+   Connects directly to a specific Chrome WebSocket debugger URL.
 
 ---
 
@@ -79,6 +80,7 @@ Example Output:
   "wsUrl": "ws://127.0.0.1:59142/devtools/browser/...",
   "targetId": "2063B4D7455AF284BD3940E74F386CD9",
   "currentUrl": "https://github.com",
+  "visualEpoch": 1,
   "viewport": {
     "width": 1440,
     "height": 900,
@@ -97,7 +99,7 @@ Example Output:
 
 ---
 
-## 4. Interactive CLI
+## 4. Interactive CLI REPL
 
 Launch the interactive terminal REPL to test actions directly:
 
@@ -105,29 +107,51 @@ Launch the interactive terminal REPL to test actions directly:
 npm run cli
 ```
 
-Available REPL commands:
-- `auto-connect` — Auto-discover and connect to running Chrome
-- `doctor` — Run diagnostic check
-- `tabs` / `tab <targetId>` — List and switch tabs
-- `windows` / `newtab [url]` / `closetab [targetId]` — Manage tabs and windows
-- `nav <url>` / `back` / `forward` / `reload` — Browser chassis navigation
-- `observe [filepath]` — Capture observation and record `observationId`
-- `move <x> <y>` — Move mouse
-- `click <x> <y> [button]` — Click at coordinate (`left`, `right`, `middle`, `back`, `forward`)
-- `dblclick <x> <y>` — Double click
-- `scroll <x> <y> <deltaY> [deltaX]` — Scroll wheel at coordinate
-- `drag <x1,y1> <x2,y2> ...` — Multi-point drag path
-- `type <text>` — Insert text (`auto`, `insert_text`, `key_events`)
-- `keypress <key1> [key2]` — Dispatch shortcut (e.g. `keypress Meta A`)
-- `keydown <key>` / `keyup <key>` — Press and release individual keys
-- `dialog` / `dialog-accept` / `dialog-dismiss` — Intercept and handle JS dialogs
+### Complete Command Reference
+
+| Command | Arguments | Description |
+| :--- | :--- | :--- |
+| `auto-connect` | — | Auto-discover and connect to running Chrome instance |
+| `connect` | `[port] [host]` | Connect to specific HTTP remote debugging endpoint (default: 9222 127.0.0.1) |
+| `doctor` | — | Run diagnostic check and display viewport/scale metrics |
+| `nav` | `<url>` | Navigate active tab to URL |
+| `back` | — | Navigate back in session history |
+| `forward` | — | Navigate forward in session history |
+| `reload` | — | Reload active tab |
+| `observe` | `[filepath]` | Capture screenshot observation, record `observationId`, and optionally save image |
+| `click` | `<x> <y> [button]` | Click at pixel coordinates (`left`, `right`, `middle`, `back`, `forward`) |
+| `dblclick` | `<x> <y> [button]` | Double click at pixel coordinates |
+| `move` | `<x> <y>` | Move mouse cursor to coordinates |
+| `down` | `<x> <y> [button]` | Press and hold mouse button |
+| `up` | `<x> <y> [button]` | Release held mouse button |
+| `scroll` | `<x> <y> <deltaY> [deltaX]` | Scroll wheel by delta at coordinates |
+| `drag` | `<x1,y1> <x2,y2> ...` | Execute smooth multi-waypoint drag path |
+| `type` | `<text>` | Insert text into focused element |
+| `keypress` | `<key1> [key2]` | Dispatch shortcut combo (e.g. `keypress Meta a`) |
+| `keydown` | `<key>` | Press and hold key (e.g. `keydown Shift`) |
+| `keyup` | `<key>` | Release held key (e.g. `keyup Shift`) |
+| `reset-input` | — | Emergency release of all held keys, buttons, and drag state |
+| `tabs` | — | List all open browser tabs |
+| `tab` | `<targetId>` | Switch active controller session to target tab |
+| `newtab` | `[url]` | Open a new browser tab |
+| `closetab` | `[targetId]` | Close tab (defaults to active tab) |
+| `windows` | — | List all open browser windows and bounds |
+| `newwindow` | `[url]` | Open a new browser window |
+| `closewindow` | `<windowId>` | Close specific window by numeric ID |
+| `dialog` | — | Inspect active JavaScript dialog (`alert`, `confirm`, `prompt`) |
+| `dialog-accept` | `[promptText]` | Accept active dialog with optional prompt input |
+| `dialog-dismiss`| — | Dismiss/cancel active dialog |
+| `help` | — | List available CLI commands |
+| `exit` / `quit` | — | Disconnect cleanly and exit REPL |
 
 ---
 
-## 5. Model Context Protocol (MCP) Transports
+## 5. Model Context Protocol (MCP) Server
+
+The bridge provides full MCP tool exposure for AI agents (`observe`, `computer_action`, `browser_action`, `doctor`) with lazy reconnection support.
 
 ### A. Local Agents (Stdio Transport)
-Run the MCP server over standard stdio:
+Run the MCP server over standard input/output:
 ```bash
 npm run mcp
 ```
@@ -147,14 +171,18 @@ npm run mcp
 }
 ```
 
-### B. Remote / Tunneled Agents (Streamable HTTP Transport)
-Run the Streamable HTTP MCP server:
+### B. Remote & Tunneled Agents (Streamable HTTP Transport)
+Run the official Streamable HTTP MCP server:
 ```bash
 npm run mcp:http
 ```
-Listens on `http://127.0.0.1:8765/mcp` (configurable via `MCP_HTTP_PORT`, `MCP_HTTP_HOST`, and optional `MCP_AUTH_TOKEN` bearer token).
 
-*Note: For remote MCP clients (including ChatGPT workspace custom actions), connect through a supported secure tunnel to this HTTP endpoint.*
+#### Security Hardening & Configuration:
+- **Mandatory Authentication**: Auto-generates a secure Bearer token on startup, or supply via `MCP_AUTH_TOKEN` environment variable. (Disable only for local testing via `MCP_ALLOW_INSECURE_NO_AUTH=true`).
+- **DNS Rebinding & Host Validation**: Enforces Host header validation against loopback addresses (`127.0.0.1`, `localhost`, `::1`, `[::1]`) and custom hosts via `MCP_ALLOWED_HOSTS`.
+- **CORS Protection**: Cross-Origin requests are disabled by default. Enable strictly for trusted domains via `MCP_ENABLE_CORS=true` and `MCP_ALLOWED_ORIGINS=https://my-domain.com`.
+- **Request Body Limits**: Enforces payload size limits (default 10 MB, configurable via `MCP_MAX_BODY_SIZE`).
+- **Lazy Reconnect**: Tools automatically connect to Chrome on demand if Chrome is started after the MCP server.
 
 ---
 
@@ -167,7 +195,7 @@ const controller = new ChromeController({ mode: "auto" });
 await controller.connect();
 
 // 1. Capture observation
-const obs = await controller.observe();
+const obs = await controller.observe({ showCursor: true });
 console.log(`Observation ID: ${obs.observationId}, Scale: ${obs.coordinateSpace.scaleX}`);
 
 // 2. Click button using model coordinates
@@ -179,7 +207,7 @@ await controller.executeComputerAction({
   button: "left",
 });
 
-// 3. Type into focused field
+// 3. Type text into focused input
 await controller.executeComputerAction({
   type: "type",
   text: "Hello World",
@@ -192,9 +220,10 @@ await controller.executeComputerAction({
   keys: ["Meta", "A"],
 });
 
-// 5. Drag slider
+// 5. Multi-point drag
 await controller.executeComputerAction({
   type: "drag",
+  observationId: obs.observationId,
   path: [
     { x: 300, y: 150 },
     { x: 450, y: 150 },
@@ -202,6 +231,7 @@ await controller.executeComputerAction({
   ],
 });
 
+// 6. Clean disconnect
 await controller.disconnect();
 ```
 
@@ -210,29 +240,24 @@ await controller.disconnect();
 ## 7. Test Suites & Verification
 
 ```bash
-# Run unit tests (mathematical precision, schemas, mock protocol)
+# Run unit tests (ActionQueue, coordinates, inputs, protocol schemas)
 npm run test:unit
 
-# Run live Chrome integration tests (spawns real Google Chrome and verifies canvas & coordinate calibration)
+# Run live Chrome integration tests (spawns Chrome, verifies DPR 1/2 calibration, canvas apps, tabs, MCP tunnels)
 npm run test:integration
 
-# Run all tests
+# Run opt-in smoke test against an already running Chrome instance (chrome --remote-debugging-port=9222)
+npm run test:smoke
+
+# Run full project test suite
 npm test
 ```
 
-### Test Counts:
-- **Unit Tests**: 61 passed
-  - Coordinate calibration & boundary validation
-  - Resolution regression matrix (800x600 to 1920x1080, DPR 1 & 2, zoom 80%–150%)
-  - Protocol action schemas (all computer & browser actions)
-  - Mouse event sequencing, double clicks, scroll chunking, drag paths
-  - Keyboard modifiers (`Meta`, `Shift`, `Alt`, `Ctrl`), shortcuts, bulk text insertion
-  - Test fixture server validation
-- **Live Chrome Integration Tests**: 9 passed
-  - Real Chrome target calibration ($\Delta x, \Delta y \le 2$ CSS px error on real browser)
-  - Real Chrome out-of-bounds coordinate rejection (`OUT_OF_BOUNDS`)
-  - Real Chrome stale observation invalidation (`STALE_OBSERVATION`)
-  - Real Chrome 100% canvas-rendered app E2E (button clicks, menu hover, option selection, key_events typing, backspace, slider dragging)
-  - Real Chrome interactive controls (left/double/right click, nested container scrolling, input typing)
-  - Real Chrome JavaScript dialog interception and handling (`alert`, `confirm`, `prompt`)
-  - Real Chrome multi-tab lifecycle management (new tab, switch, close)
+### Test Coverage Highlights (19 Test Suites, 142+ Tests Passing):
+- **Coordinate & Pixel Calibration**: Sub-2px precision on live Chrome across DPR 1, DPR 2, and page zoom levels.
+- **Observation Guardrails**: Rejection of stale observations (`STALE_OBSERVATION`) on navigations and SPA route changes (`history.pushState`).
+- **ActionQueue Architecture**: FIFO execution, mutual exclusion, AbortSignal propagation, in-flight task tracking, and cancel-and-drain semantics.
+- **Selectorless Canvas E2E**: 100% canvas-rendered visual app automated entirely via vision coordinates and input actions with zero DOM queries.
+- **MCP Protocol Integrations**: End-to-end tests through official MCP Client using both Stdio and Streamable HTTP transports.
+- **HTTP Security**: 10-part test suite validating Bearer auth, DNS rebinding Host validation, IPv6 normalization, CORS origin whitelisting, and payload limits.
+- **Browser-Level Ops**: Tabs, windows, and JavaScript dialogs (`alert`, `confirm`, `prompt`, blocking).

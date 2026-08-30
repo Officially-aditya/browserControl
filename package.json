@@ -19,6 +19,7 @@
     "mcp:http": "tsx src/mcp/http-server.ts",
     "test:unit": "vitest run tests/coordinates tests/mouse tests/keyboard tests/protocol tests/fixtures",
     "test:integration": "vitest run tests/integration",
+    "test:smoke": "TEST_EXISTING_CHROME=1 vitest run tests/integration/existing_chrome.integration.test.ts",
     "test": "vitest run"
   },
   "keywords": [
