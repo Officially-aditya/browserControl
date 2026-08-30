@@ -13,4 +13,4 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 EXPOSE 8787
-CMD ["sh", "-c", "BROWSERCONTROL_GATEWAY_PORT=${PORT:-8787} node dist/remote/gateway.js"]
+CMD ["sh", "-c", "BROWSERCONTROL_GATEWAY_PORT=${PORT:-8787} node dist/remote/runtime.js"]
