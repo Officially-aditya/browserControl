@@ -115,6 +115,24 @@ describe("Remote web-control gateway", () => {
     }
   });
 
+  it("does not expose or dispatch pause/resume remotely", async () => {
+    calls.length = 0;
+    const { client, transport } = createClient();
+    try {
+      await client.connect(transport);
+      const listed = await client.listTools();
+      const names = listed.tools.map((tool) => tool.name);
+      expect(names).not.toContain("browser_pause");
+      expect(names).not.toContain("browser_resume");
+
+      const pause = await client.callTool({ name: "browser_pause", arguments: {} });
+      expect(pause.isError).toBe(true);
+      expect(calls.some((call) => call.method === "pause" || call.method === "resume")).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("returns a high-detail region as a new observation and preserves source mapping request", async () => {
     calls.length = 0;
     const { client, transport } = createClient();
@@ -140,13 +158,7 @@ describe("Remote web-control gateway", () => {
 
       const inspect = calls.find((call) => call.method === "inspect_region");
       expect(inspect).toBeDefined();
-      expect(inspect!.params).toMatchObject({
-        observationId,
-        x: 250,
-        y: 250,
-        width: 400,
-        height: 400,
-      });
+      expect(inspect!.params).toMatchObject({ observationId, x: 250, y: 250, width: 400, height: 400 });
     } finally {
       await client.close();
     }
