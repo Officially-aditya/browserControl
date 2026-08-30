@@ -1,4 +1,4 @@
-import type { WebSocketServer } from "ws";
+import WebSocket, { type WebSocketServer } from "ws";
 import { runRemoteGateway, type RemoteGatewayOptions } from "./gateway.js";
 
 export interface GatewayRuntimeOptions extends RemoteGatewayOptions {
@@ -14,9 +14,9 @@ export function installExtensionHeartbeat(
   const timeoutMs = Math.max(options.heartbeatTimeoutMs ?? 45_000, intervalMs + 1_000);
   const lastSeen = new WeakMap<object, number>();
 
-  const markAlive = (ws: any) => lastSeen.set(ws, Date.now());
+  const markAlive = (ws: WebSocket) => lastSeen.set(ws, Date.now());
 
-  const onConnection = (ws: any) => {
+  const onConnection = (ws: WebSocket) => {
     markAlive(ws);
     ws.on("pong", () => markAlive(ws));
     ws.on("message", () => markAlive(ws));
@@ -28,7 +28,7 @@ export function installExtensionHeartbeat(
   const timer = setInterval(() => {
     const now = Date.now();
     for (const ws of wss.clients) {
-      if (ws.readyState !== ws.OPEN) continue;
+      if (ws.readyState !== WebSocket.OPEN) continue;
       const seenAt = lastSeen.get(ws) ?? now;
       if (now - seenAt > timeoutMs) {
         ws.terminate();
