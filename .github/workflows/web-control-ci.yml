@@ -31,5 +31,17 @@ jobs:
           node --check extension/popup.js
       - run: npm run build
       - run: npm run test:web
-      - name: Real Chrome extension → gateway → MCP canary
+      - name: Generate throwaway localhost TLS certificate
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /tmp/browsercontrol-test-key.pem \
+            -out /tmp/browsercontrol-test-cert.pem \
+            -days 1 \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost"
+      - name: Real Chrome extension → WSS gateway → MCP canary
+        env:
+          BROWSERCONTROL_TEST_TLS_KEY: /tmp/browsercontrol-test-key.pem
+          BROWSERCONTROL_TEST_TLS_CERT: /tmp/browsercontrol-test-cert.pem
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: xvfb-run -a npx vitest run tests/integration/extension_gateway.integration.test.ts
