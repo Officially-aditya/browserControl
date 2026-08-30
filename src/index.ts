@@ -33,6 +33,7 @@ export {
   VisionAgentConfig,
   VisionAgentRunOptions,
   VisionAgentRunResult,
+  PendingConfirmation,
 } from "./agent/runtime.js";
 export {
   VisionModelAdapter,

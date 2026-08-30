@@ -5,9 +5,9 @@ import { ObservationPlanner, PlannerOptions } from "../vision/planner.js";
 import { VisionFrameMapper } from "../vision/frame-mapper.js";
 import { VisionFrame } from "../vision/frame.js";
 import { AgentMemory } from "./memory.js";
-import { ActionPolicy, ActionPolicyOptions } from "./policy.js";
+import { ActionPolicy, ActionPolicyOptions, ActionPolicyContext, PolicyEvaluation } from "./policy.js";
 import { AgentMetrics, MetricsCollector } from "./metrics.js";
-import { VisionRequest, VisionDecision } from "../vision/types.js";
+import { VisionRequest, VisionDecision, NormalizedComputerAction, NormalizedBrowserAction } from "../vision/types.js";
 import { ActionResult } from "../protocol/results.js";
 
 export interface VisionAgentConfig {
@@ -25,6 +25,15 @@ export interface VisionAgentRunOptions {
   initialUrl?: string;
 }
 
+export interface PendingConfirmation {
+  action: NormalizedComputerAction | NormalizedBrowserAction;
+  decision: VisionDecision;
+  reason: string;
+  policyContext: ActionPolicyContext;
+  stepIndex: number;
+  metrics: AgentMetrics;
+}
+
 export interface VisionAgentRunResult {
   success: boolean;
   objective: string;
@@ -33,6 +42,7 @@ export interface VisionAgentRunResult {
   error?: string;
   durationMs: number;
   metrics: AgentMetrics;
+  pendingConfirmation?: PendingConfirmation;
 }
 
 /**
@@ -199,6 +209,33 @@ export class VisionAgent {
                 decision.action
               );
               break;
+            }
+
+            if (policyEval === "require_confirmation") {
+              const policyContext: ActionPolicyContext = {
+                objective: options.objective,
+                certainty: decision.certainty || "certain",
+                currentUrl: this.controller.session.currentUrl || undefined,
+                stepIndex: planner.currentStep,
+                frameKind: currentActiveFrame.kind,
+                recentActionsCount: memory.totalSteps,
+              };
+              return {
+                success: false,
+                objective: options.objective,
+                totalSteps: planner.currentStep,
+                error: "CONFIRMATION_REQUIRED",
+                durationMs: Date.now() - startTime,
+                metrics: metrics.getMetrics(),
+                pendingConfirmation: {
+                  action: decision.action,
+                  decision,
+                  reason: `Policy requires confirmation for ${decision.action.type}`,
+                  policyContext,
+                  stepIndex: planner.currentStep,
+                  metrics: metrics.getMetrics(),
+                },
+              };
             }
 
             if (policyEval === "inspect" && currentActiveFrame.kind === "overview" && "x" in decision.action) {
