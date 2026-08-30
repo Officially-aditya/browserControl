@@ -35,6 +35,18 @@ async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise
   try { return await response; } finally { ws.close(); }
 }
 
+async function runtimeMessage(wsUrl: string, message: any): Promise<any> {
+  const result = await sendCdp(wsUrl, "Runtime.evaluate", {
+    expression: `chrome.runtime.sendMessage(${JSON.stringify(message)})`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(`Extension runtime message threw: ${JSON.stringify(result.exceptionDetails)}`);
+  }
+  return result.result?.value;
+}
+
 async function evaluateWebSocketProbe(wsUrl: string, targetUrl: string): Promise<{ value: any; events: any[] }> {
   const ws = await openWebSocket(wsUrl);
   let nextId = 1;
@@ -162,11 +174,13 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
       throw new Error(`Extension-page secure WebSocket probe failed: ${JSON.stringify(probe)}`);
     }
 
-    await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"wss://localhost:8787/extension",deviceToken:"",autoReconnect:true}})`,
-      awaitPromise: true,
-      returnByValue: true,
+    const saved = await runtimeMessage(popup.webSocketDebuggerUrl, {
+      type: "saveConfig",
+      config: { gatewayUrl: "wss://localhost:8787/extension", deviceToken: "", autoReconnect: true },
     });
+    if (!saved?.ok) {
+      throw new Error(`Extension saveConfig failed: ${JSON.stringify(saved)}`);
+    }
 
     const connectDeadline = Date.now() + 8000;
     let extensionConnected = false;
@@ -178,13 +192,13 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    expect(extensionConnected).toBe(true);
+    if (!extensionConnected) {
+      const state = await runtimeMessage(popup.webSocketDebuggerUrl, { type: "getStatus" });
+      throw new Error(`Extension worker received config but never connected: ${JSON.stringify({ saved, state })}`);
+    }
 
-    await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
-      awaitPromise: true,
-      returnByValue: true,
-    });
+    const shared = await runtimeMessage(popup.webSocketDebuggerUrl, { type: "shareActiveTab" });
+    if (!shared?.ok) throw new Error(`Extension shareActiveTab failed: ${JSON.stringify(shared)}`);
     await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
