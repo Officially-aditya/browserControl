@@ -1,14 +1,17 @@
-import type http from "node:http";
+import net from "node:net";
+import tls from "node:tls";
 import WebSocket, { type WebSocketServer } from "ws";
 import { runRemoteGateway, type RemoteGatewayOptions } from "./gateway.js";
 
 export interface GatewayRuntimeOptions extends RemoteGatewayOptions {
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
+  tlsKey?: string | Buffer;
+  tlsCert?: string | Buffer;
 }
 
 export interface GatewayRuntimeHandle {
-  httpServer: http.Server;
+  httpServer: net.Server;
   wss: WebSocketServer;
   stopHeartbeat: () => void;
 }
@@ -42,8 +45,7 @@ export function installExtensionHeartbeat(
         continue;
       }
       try {
-        // A real application message is intentional: Chrome MV3 counts
-        // WebSocket message traffic as extension service-worker activity.
+        // Application-level traffic keeps Chrome MV3 service workers active.
         ws.send(JSON.stringify({ type: "keepalive", timestamp: now }));
         ws.ping();
       } catch {
@@ -59,11 +61,86 @@ export function installExtensionHeartbeat(
   };
 }
 
+async function listen(server: net.Server, port: number, host: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => resolve());
+  });
+}
+
+function closeServer(server: net.Server): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
 export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Promise<GatewayRuntimeHandle> {
-  const gateway = await runRemoteGateway(options);
-  const stopHeartbeat = installExtensionHeartbeat(gateway.wss, options);
-  gateway.httpServer.once("close", stopHeartbeat);
-  return { httpServer: gateway.httpServer, wss: gateway.wss, stopHeartbeat };
+  const wantsTls = options.tlsKey != null || options.tlsCert != null;
+  if (wantsTls && (!options.tlsKey || !options.tlsCert)) {
+    throw new Error("Both tlsKey and tlsCert are required when TLS is enabled");
+  }
+
+  if (!wantsTls) {
+    const gateway = await runRemoteGateway(options);
+    const stopHeartbeat = installExtensionHeartbeat(gateway.wss, options);
+    gateway.httpServer.once("close", stopHeartbeat);
+    return { httpServer: gateway.httpServer, wss: gateway.wss, stopHeartbeat };
+  }
+
+  const publicHost = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
+  const publicPort = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
+
+  // Keep the proven MCP/WebSocket gateway on a private ephemeral loopback port
+  // and put a transparent TLS terminator in front of it. This mirrors normal
+  // production deployment behind a TLS reverse proxy without duplicating MCP logic.
+  const internalGateway = await runRemoteGateway({
+    ...options,
+    host: "127.0.0.1",
+    port: 0,
+  });
+  const internalAddress = internalGateway.httpServer.address();
+  if (!internalAddress || typeof internalAddress === "string") {
+    await closeServer(internalGateway.httpServer);
+    throw new Error("Could not determine internal browserControl gateway port");
+  }
+
+  const stopHeartbeat = installExtensionHeartbeat(internalGateway.wss, options);
+  const tlsServer = tls.createServer(
+    { key: options.tlsKey!, cert: options.tlsCert! },
+    (secureSocket) => {
+      const upstream = net.connect(internalAddress.port, "127.0.0.1");
+      secureSocket.pipe(upstream).pipe(secureSocket);
+
+      const closePeer = () => {
+        if (!secureSocket.destroyed) secureSocket.destroy();
+        if (!upstream.destroyed) upstream.destroy();
+      };
+      secureSocket.on("error", closePeer);
+      upstream.on("error", closePeer);
+    }
+  );
+
+  try {
+    await listen(tlsServer, publicPort, publicHost);
+  } catch (error) {
+    stopHeartbeat();
+    internalGateway.wss.close();
+    await closeServer(internalGateway.httpServer);
+    throw error;
+  }
+
+  tlsServer.once("close", () => {
+    stopHeartbeat();
+    internalGateway.wss.close();
+    void closeServer(internalGateway.httpServer);
+  });
+
+  const address = tlsServer.address();
+  const actualPort = typeof address === "object" && address ? address.port : publicPort;
+  console.log(`[browserControl] Secure gateway listening on https://${publicHost}:${actualPort}`);
+  console.log(`[browserControl] MCP endpoint: https://${publicHost}:${actualPort}/mcp`);
+  console.log(`[browserControl] Extension endpoint: wss://${publicHost}:${actualPort}/extension`);
+
+  return { httpServer: tlsServer, wss: internalGateway.wss, stopHeartbeat };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
