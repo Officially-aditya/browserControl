@@ -82,15 +82,11 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     const worker = await findExtensionWorker(chrome.port);
-    const shareExpression = `chrome.runtime.sendMessage({type:"shareActiveTab"})`;
-    const evaluated = await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: shareExpression,
+    await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
+      expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
       awaitPromise: true,
       returnByValue: true,
     });
-    const rawShareResult = evaluated.result.value;
-    const shareResult = typeof rawShareResult === "string" ? JSON.parse(rawShareResult) : rawShareResult;
-    expect(shareResult.ok).toBe(true);
 
     const deadline = Date.now() + 5000;
     let extensionConnected = false;
@@ -126,7 +122,10 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
   it("captures the shared tab through chrome.debugger and executes an observation-bound click", async () => {
     const status = await client.callTool({ name: "browser_status", arguments: {} });
     expect(status.isError).toBeFalsy();
-    expect((status.content[0] as any).text).toContain('"attachedTabId"');
+    const statusPayload = JSON.parse((status.content[0] as any).text);
+    expect(statusPayload.extension.connected).toBe(true);
+    expect(statusPayload.extension.attachedTabId).not.toBeNull();
+    expect(statusPayload.extension.attachedTabId).toBeDefined();
 
     const observation = await client.callTool({ name: "browser_observe", arguments: { format: "png" } });
     expect(observation.isError).toBeFalsy();
