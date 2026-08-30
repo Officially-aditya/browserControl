@@ -34,6 +34,7 @@ export async function launchRealChrome(options: {
   const windowSize = options.windowSize || "1280,800";
   const headless = options.headless ?? true;
   const disableBackgroundNetworking = options.disableBackgroundNetworking ?? true;
+  const ciSandboxWorkaround = process.env.BROWSERCONTROL_CHROME_CI_NO_SANDBOX === "1";
 
   const args = [
     "--remote-debugging-port=0",
@@ -42,6 +43,7 @@ export async function launchRealChrome(options: {
     "--no-first-run",
     "--no-default-browser-check",
     ...(disableBackgroundNetworking ? ["--disable-background-networking"] : []),
+    ...(ciSandboxWorkaround ? ["--no-sandbox", "--disable-dev-shm-usage"] : []),
     "--disable-sync",
     "--disable-gpu",
     `--window-size=${windowSize}`,
