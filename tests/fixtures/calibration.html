@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Coordinate Calibration</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: #f8fafc;
+      font-family: monospace;
+      overflow: hidden;
+      position: relative;
+    }
+    .target {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      transform: translate(-50%, -50%);
+      pointer-events: auto;
+      cursor: crosshair;
+    }
+    .target::before, .target::after {
+      content: '';
+      position: absolute;
+      background: #ef4444;
+    }
+    .target::before {
+      top: 9px; left: 0; width: 20px; height: 2px;
+    }
+    .target::after {
+      top: 0; left: 9px; width: 2px; height: 20px;
+    }
+    .target .dot {
+      position: absolute;
+      top: 7px; left: 7px; width: 6px; height: 6px;
+      background: #ef4444;
+      border-radius: 50%;
+    }
+    .label {
+      position: absolute;
+      top: 24px;
+      left: -20px;
+      font-size: 12px;
+      color: #334155;
+      white-space: nowrap;
+    }
+    #hud {
+      position: fixed;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(15, 23, 42, 0.9);
+      color: #38bdf8;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="target-1" class="target" style="left: 100px; top: 100px;">
+    <div class="dot"></div>
+    <div class="label">(100, 100)</div>
+  </div>
+
+  <div id="target-2" class="target" style="left: 500px; top: 300px;">
+    <div class="dot"></div>
+    <div class="label">(500, 300)</div>
+  </div>
+
+  <div id="target-3" class="target" style="left: 1000px; top: 700px;">
+    <div class="dot"></div>
+    <div class="label">(1000, 700)</div>
+  </div>
+
+  <div id="hud">
+    <div>Calibration Target Page</div>
+    <div id="clicks">Clicks: 0</div>
+    <div id="last-click">Last Click: none</div>
+  </div>
+
+  <script>
+    window.__CLICK_LOGS__ = [];
+
+    window.addEventListener('click', (e) => {
+      const clickData = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        pageX: e.pageX,
+        pageY: e.pageY,
+        button: e.button,
+        targetId: e.target.id || e.target.parentElement?.id || 'background',
+        timestamp: Date.now()
+      };
+      window.__CLICK_LOGS__.push(clickData);
+
+      document.getElementById('clicks').innerText = `Clicks: ${window.__CLICK_LOGS__.length}`;
+      document.getElementById('last-click').innerText = `Last Click: (${e.clientX}, ${e.clientY})`;
+
+      // Create a visual marker where the click landed
+      const mark = document.createElement('div');
+      mark.style.position = 'absolute';
+      mark.style.left = `${e.clientX - 3}px`;
+      mark.style.top = `${e.clientY - 3}px`;
+      mark.style.width = '6px';
+      mark.style.height = '6px';
+      mark.style.borderRadius = '50%';
+      mark.style.background = '#10b981';
+      mark.style.pointerEvents = 'none';
+      document.body.appendChild(mark);
+    });
+  </script>
+</body>
+</html>

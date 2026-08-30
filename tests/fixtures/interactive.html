@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Interactive Controls</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 30px;
+      background: #f1f5f9;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+    .card {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .scroll-box {
+      width: 100%;
+      height: 150px;
+      overflow-y: scroll;
+      border: 1px solid #cbd5e1;
+      padding: 10px;
+      background: #fafafa;
+    }
+    .scroll-content {
+      height: 600px;
+    }
+    .dropdown {
+      position: relative;
+      display: inline-block;
+    }
+    .dropbtn {
+      background: #2563eb;
+      color: white;
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .dropdown-content {
+      display: none;
+      position: absolute;
+      background: white;
+      min-width: 160px;
+      box-shadow: 0 8px 16px rgba(0,0,0,0.15);
+      border-radius: 6px;
+      z-index: 10;
+    }
+    .dropdown-content a {
+      color: #334155;
+      padding: 10px 14px;
+      text-decoration: none;
+      display: block;
+    }
+    .dropdown-content a:hover {
+      background: #f8fafc;
+      color: #2563eb;
+    }
+    .dropdown:hover .dropdown-content {
+      display: block;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 15px;
+      margin-top: 8px;
+    }
+    [contenteditable="true"] {
+      min-height: 80px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 10px;
+      background: white;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1 style="margin-bottom: 20px;">Interactive Test Page</h1>
+
+  <div class="grid">
+    <!-- Card 1: Buttons & Clicks -->
+    <div class="card">
+      <h2>Mouse Clicks & Hover</h2>
+      <button id="test-btn" class="dropbtn" style="margin: 10px 0;">Click Me</button>
+      <div id="btn-count">Button clicks: 0</div>
+      <div id="btn-dbl">Double clicks: 0</div>
+      <div id="btn-right">Right clicks: 0</div>
+
+      <div class="dropdown" style="margin-top: 15px;">
+        <button id="hover-menu-btn" class="dropbtn">Hover Menu ▾</button>
+        <div id="dropdown-menu" class="dropdown-content">
+          <a href="#" id="menu-item-1">Item Alpha</a>
+          <a href="#" id="menu-item-2">Item Beta</a>
+          <a href="#" id="menu-item-3">Item Gamma</a>
+        </div>
+      </div>
+      <div id="hover-selection" style="margin-top: 8px;">Selected: none</div>
+    </div>
+
+    <!-- Card 2: Nested Scroll Container -->
+    <div class="card">
+      <h2>Nested Scrollable Area</h2>
+      <div id="nested-scroll" class="scroll-box">
+        <div class="scroll-content">
+          <p>Top of scroll container</p>
+          <div style="margin-top: 200px;" id="mid-item">Middle Item Marker (scrollY ~200)</div>
+          <div style="margin-top: 300px;" id="bot-item">Bottom Item Marker (scrollY ~500)</div>
+        </div>
+      </div>
+      <div id="scroll-pos" style="margin-top: 10px;">Scroll Top: 0px</div>
+    </div>
+
+    <!-- Card 3: Inputs & Typing -->
+    <div class="card">
+      <h2>Text Inputs & Shortcuts</h2>
+      <input type="text" id="text-input" placeholder="Type here..." />
+      <div style="margin-top: 10px;">
+        <label>Contenteditable Div:</label>
+        <div id="editor" contenteditable="true">Editable text area</div>
+      </div>
+    </div>
+
+    <!-- Card 4: Keyboard Event Logger -->
+    <div class="card">
+      <h2>Key Combo Logger</h2>
+      <div id="key-log" style="font-family: monospace; font-size: 13px; color: #475569; min-height: 100px;">
+        No keys logged yet
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.__STATE__ = {
+      clicks: 0,
+      doubleClicks: 0,
+      rightClicks: 0,
+      hoverSelected: null,
+      scrollPosition: 0,
+      inputValue: "",
+      editorValue: "",
+      lastKeys: []
+    };
+
+    const btn = document.getElementById('test-btn');
+    btn.addEventListener('click', () => {
+      window.__STATE__.clicks++;
+      document.getElementById('btn-count').innerText = `Button clicks: ${window.__STATE__.clicks}`;
+    });
+    btn.addEventListener('dblclick', () => {
+      window.__STATE__.doubleClicks++;
+      document.getElementById('btn-dbl').innerText = `Double clicks: ${window.__STATE__.doubleClicks}`;
+    });
+    btn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      window.__STATE__.rightClicks++;
+      document.getElementById('btn-right').innerText = `Right clicks: ${window.__STATE__.rightClicks}`;
+    });
+
+    ['menu-item-1', 'menu-item-2', 'menu-item-3'].forEach(id => {
+      document.getElementById(id).addEventListener('click', (e) => {
+        e.preventDefault();
+        window.__STATE__.hoverSelected = id;
+        document.getElementById('hover-selection').innerText = `Selected: ${id}`;
+      });
+    });
+
+    const scrollBox = document.getElementById('nested-scroll');
+    scrollBox.addEventListener('scroll', () => {
+      window.__STATE__.scrollPosition = scrollBox.scrollTop;
+      document.getElementById('scroll-pos').innerText = `Scroll Top: ${Math.round(scrollBox.scrollTop)}px`;
+    });
+
+    const textInput = document.getElementById('text-input');
+    textInput.addEventListener('input', () => {
+      window.__STATE__.inputValue = textInput.value;
+    });
+
+    const editor = document.getElementById('editor');
+    editor.addEventListener('input', () => {
+      window.__STATE__.editorValue = editor.innerText;
+    });
+
+    window.addEventListener('keydown', (e) => {
+      const entry = `${e.metaKey ? 'Meta+' : ''}${e.ctrlKey ? 'Ctrl+' : ''}${e.shiftKey ? 'Shift+' : ''}${e.altKey ? 'Alt+' : ''}${e.key}`;
+      window.__STATE__.lastKeys.push(entry);
+      document.getElementById('key-log').innerText = window.__STATE__.lastKeys.slice(-8).join('\n');
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Pure Canvas UI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: #0f172a;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    #appCanvas {
+      background: #1e293b;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Pure Canvas: Zero DOM elements for buttons, inputs, menus, sliders -->
+  <canvas id="appCanvas" width="1000" height="700"></canvas>
+
+  <script>
+    const canvas = document.getElementById('appCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // UI state stored in window.__CANVAS_STATE__ for programmatic verification
+    window.__CANVAS_STATE__ = {
+      buttonClicks: 0,
+      inputText: "",
+      isInputFocused: false,
+      menuHovered: false,
+      menuSelectedOption: null,
+      sliderX: 500, // Range 450 to 750
+      dragActive: false,
+    };
+
+    const UI = {
+      button: { x: 100, y: 80, w: 140, h: 44, text: "SUBMIT" },
+      input: { x: 100, y: 160, w: 260, h: 44, placeholder: "Type here..." },
+      menu: { x: 100, y: 240, w: 180, h: 40, label: "Hover Dropdown ▾" },
+      menuItems: [
+        { id: "opt1", label: "Option 1: Alpha", y: 280, h: 32 },
+        { id: "opt2", label: "Option 2: Beta", y: 312, h: 32 },
+        { id: "opt3", label: "Option 3: Gamma", y: 344, h: 32 },
+      ],
+      sliderTrack: { x: 450, y: 100, w: 300, h: 10 },
+      sliderHandle: { y: 90, w: 30, h: 30 },
+    };
+
+    let mouseX = 0;
+    let mouseY = 0;
+
+    function render() {
+      // Clear
+      ctx.fillStyle = "#1e293b";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Header
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "bold 20px sans-serif";
+      ctx.fillText("Pure Canvas UI - 100% Non-DOM Interface", 100, 45);
+
+      // 1. Button
+      const isButtonHovered = isInside(mouseX, mouseY, UI.button);
+      ctx.fillStyle = isButtonHovered ? "#2563eb" : "#3b82f6";
+      ctx.beginPath();
+      ctx.roundRect(UI.button.x, UI.button.y, UI.button.w, UI.button.h, 6);
+      ctx.fill();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 15px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        `${UI.button.text} (${window.__CANVAS_STATE__.buttonClicks})`,
+        UI.button.x + UI.button.w / 2,
+        UI.button.y + UI.button.h / 2
+      );
+
+      // 2. Input Box
+      ctx.textAlign = "left";
+      ctx.fillStyle = window.__CANVAS_STATE__.isInputFocused ? "#334155" : "#0f172a";
+      ctx.strokeStyle = window.__CANVAS_STATE__.isInputFocused ? "#60a5fa" : "#475569";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(UI.input.x, UI.input.y, UI.input.w, UI.input.h, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = window.__CANVAS_STATE__.inputText ? "#f8fafc" : "#64748b";
+      ctx.font = "14px sans-serif";
+      ctx.fillText(
+        window.__CANVAS_STATE__.inputText || UI.input.placeholder,
+        UI.input.x + 12,
+        UI.input.y + UI.input.h / 2
+      );
+
+      // 3. Hover Menu Header
+      ctx.fillStyle = window.__CANVAS_STATE__.menuHovered ? "#475569" : "#334155";
+      ctx.beginPath();
+      ctx.roundRect(UI.menu.x, UI.menu.y, UI.menu.w, UI.menu.h, 6);
+      ctx.fill();
+
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "14px sans-serif";
+      ctx.fillText(
+        window.__CANVAS_STATE__.menuSelectedOption || UI.menu.label,
+        UI.menu.x + 12,
+        UI.menu.y + UI.menu.h / 2
+      );
+
+      // Hover Dropdown Options
+      if (window.__CANVAS_STATE__.menuHovered) {
+        ctx.fillStyle = "#1e293b";
+        ctx.strokeStyle = "#475569";
+        ctx.fillRect(UI.menu.x, 280, UI.menu.w, 96);
+        ctx.strokeRect(UI.menu.x, 280, UI.menu.w, 96);
+
+        UI.menuItems.forEach((item) => {
+          const itemRect = { x: UI.menu.x, y: item.y, w: UI.menu.w, h: item.h };
+          if (isInside(mouseX, mouseY, itemRect)) {
+            ctx.fillStyle = "#3b82f6";
+            ctx.fillRect(itemRect.x, itemRect.y, itemRect.w, itemRect.h);
+            ctx.fillStyle = "#ffffff";
+          } else {
+            ctx.fillStyle = "#cbd5e1";
+          }
+          ctx.fillText(item.label, itemRect.x + 10, itemRect.y + item.h / 2);
+        });
+      }
+
+      // 4. Draggable Slider Track & Handle
+      ctx.fillStyle = "#475569";
+      ctx.beginPath();
+      ctx.roundRect(UI.sliderTrack.x, UI.sliderTrack.y, UI.sliderTrack.w, UI.sliderTrack.h, 5);
+      ctx.fill();
+
+      // Slider Handle
+      ctx.fillStyle = "#10b981";
+      ctx.beginPath();
+      ctx.roundRect(
+        window.__CANVAS_STATE__.sliderX - UI.sliderHandle.w / 2,
+        UI.sliderHandle.y,
+        UI.sliderHandle.w,
+        UI.sliderHandle.h,
+        6
+      );
+      ctx.fill();
+
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "14px sans-serif";
+      ctx.fillText(`Slider Position: ${Math.round(window.__CANVAS_STATE__.sliderX)}`, UI.sliderTrack.x, 60);
+
+      // State HUD on Canvas
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "12px monospace";
+      ctx.fillText(`State: ${JSON.stringify(window.__CANVAS_STATE__)}`, 50, 650);
+    }
+
+    function isInside(x, y, rect) {
+      return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+    }
+
+    function getCanvasCoords(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+      const pos = getCanvasCoords(e);
+      mouseX = pos.x;
+      mouseY = pos.y;
+
+      const inMenu = isInside(mouseX, mouseY, UI.menu);
+      const inDropdown = window.__CANVAS_STATE__.menuHovered &&
+        mouseX >= UI.menu.x && mouseX <= UI.menu.x + UI.menu.w && mouseY >= 280 && mouseY <= 376;
+      window.__CANVAS_STATE__.menuHovered = inMenu || inDropdown;
+
+      if (window.__CANVAS_STATE__.dragActive) {
+        window.__CANVAS_STATE__.sliderX = Math.max(UI.sliderTrack.x, Math.min(UI.sliderTrack.x + UI.sliderTrack.w, mouseX));
+      }
+
+      render();
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+      const pos = getCanvasCoords(e);
+      const handleRect = {
+        x: window.__CANVAS_STATE__.sliderX - UI.sliderHandle.w / 2,
+        y: UI.sliderHandle.y,
+        w: UI.sliderHandle.w,
+        h: UI.sliderHandle.h,
+      };
+
+      if (isInside(pos.x, pos.y, handleRect)) {
+        window.__CANVAS_STATE__.dragActive = true;
+      }
+
+      if (isInside(pos.x, pos.y, UI.button)) {
+        window.__CANVAS_STATE__.buttonClicks++;
+      }
+
+      window.__CANVAS_STATE__.isInputFocused = isInside(pos.x, pos.y, UI.input);
+
+      if (window.__CANVAS_STATE__.menuHovered) {
+        UI.menuItems.forEach((item) => {
+          if (isInside(pos.x, pos.y, { x: UI.menu.x, y: item.y, w: UI.menu.w, h: item.h })) {
+            window.__CANVAS_STATE__.menuSelectedOption = item.label;
+          }
+        });
+      }
+
+      render();
+    });
+
+    window.addEventListener('mouseup', () => {
+      window.__CANVAS_STATE__.dragActive = false;
+      render();
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (!window.__CANVAS_STATE__.isInputFocused) return;
+
+      if (e.key === 'Backspace') {
+        window.__CANVAS_STATE__.inputText = window.__CANVAS_STATE__.inputText.slice(0, -1);
+      } else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+        window.__CANVAS_STATE__.inputText += e.key;
+      }
+      render();
+    });
+
+    // Support text insertion event via input
+    window.addEventListener('input', (e) => {
+      if (window.__CANVAS_STATE__.isInputFocused && e.data) {
+        window.__CANVAS_STATE__.inputText += e.data;
+        render();
+      }
+    });
+
+    render();
+  </script>
+</body>
+</html>

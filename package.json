@@ -1,0 +1,47 @@
+{
+  "name": "chrome-computer-use",
+  "version": "1.0.0",
+  "description": "Browser-control layer for vision AI agents using Chrome DevTools Protocol (CDP) and computer-use interaction model",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "bin": {
+    "chrome-computer-use": "./dist/cli/index.js",
+    "chrome-computer-use-mcp": "./dist/mcp/server.js",
+    "chrome-computer-use-http": "./dist/mcp/http-server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "cli": "tsx src/cli/index.ts",
+    "doctor": "tsx src/cli/index.ts doctor",
+    "mcp": "tsx src/mcp/server.ts",
+    "mcp:http": "tsx src/mcp/http-server.ts",
+    "test:unit": "vitest run tests/coordinates tests/mouse tests/keyboard tests/protocol tests/fixtures",
+    "test:integration": "vitest run tests/integration",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "chrome",
+    "computer-use",
+    "cdp",
+    "vision-agent",
+    "ai-agent",
+    "mcp",
+    "browser-automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.6"
+  }
+}
