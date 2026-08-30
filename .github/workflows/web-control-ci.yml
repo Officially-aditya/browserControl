@@ -8,14 +8,14 @@ on:
     paths:
       - 'src/**'
       - 'extension/**'
-      - 'tests/**'
+      - 'tests/remote/**'
       - 'package*.json'
       - 'tsconfig.json'
 
 jobs:
-  test:
+  web-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,4 +28,4 @@ jobs:
           node --check extension/service-worker.js
           node --check extension/popup.js
       - run: npm run build
-      - run: npm run test:unit
+      - run: npm run test:web
