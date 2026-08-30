@@ -40,7 +40,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.6.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "pngjs": "^7.0.0",
     "ws": "^8.18.0",
     "zod": "^3.24.2"
