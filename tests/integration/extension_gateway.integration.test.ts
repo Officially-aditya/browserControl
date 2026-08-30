@@ -9,12 +9,17 @@ import { startTestServer, TestServer } from "../fixtures/test-server.js";
 import { ChromeController } from "../../src/controller.js";
 import { runGatewayRuntime } from "../../src/remote/runtime.js";
 
-async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise<any> {
+async function openWebSocket(wsUrl: string): Promise<WebSocket> {
   const ws = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     ws.once("open", () => resolve());
     ws.once("error", reject);
   });
+  return ws;
+}
+
+async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise<any> {
+  const ws = await openWebSocket(wsUrl);
   const id = Math.floor(Math.random() * 1_000_000) + 1;
   const response = new Promise<any>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${method}`)), 5000);
@@ -28,6 +33,53 @@ async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise
   });
   ws.send(JSON.stringify({ id, method, params }));
   try { return await response; } finally { ws.close(); }
+}
+
+async function evaluateWebSocketProbe(wsUrl: string, targetUrl: string): Promise<{ value: any; events: any[] }> {
+  const ws = await openWebSocket(wsUrl);
+  let nextId = 1;
+  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+  const events: any[] = [];
+
+  ws.on("message", (raw) => {
+    const message = JSON.parse(raw.toString());
+    if (typeof message.id === "number") {
+      const entry = pending.get(message.id);
+      if (!entry) return;
+      pending.delete(message.id);
+      if (message.error) entry.reject(new Error(message.error.message));
+      else entry.resolve(message.result);
+      return;
+    }
+    if (typeof message.method === "string" && message.method.startsWith("Network.webSocket")) {
+      events.push({ method: message.method, params: message.params });
+    }
+  });
+
+  const call = (method: string, params: any = {}) => {
+    const id = nextId++;
+    const promise = new Promise<any>((resolve, reject) => pending.set(id, { resolve, reject }));
+    ws.send(JSON.stringify({ id, method, params }));
+    return promise;
+  };
+
+  try {
+    await call("Network.enable");
+    const result = await call("Runtime.evaluate", {
+      expression: `new Promise((resolve) => {
+        const probeSocket = new WebSocket(${JSON.stringify(targetUrl)});
+        const timer = setTimeout(() => resolve({ok:false, timeout:true, readyState:probeSocket.readyState}), 3000);
+        probeSocket.onopen = () => { clearTimeout(timer); probeSocket.close(1000, "probe"); resolve({ok:true}); };
+        probeSocket.onerror = () => { clearTimeout(timer); resolve({ok:false, error:true, readyState:probeSocket.readyState}); };
+      })`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return { value: result.result?.value, events };
+  } finally {
+    ws.close();
+  }
 }
 
 async function listTargets(port: number): Promise<any[]> {
@@ -104,17 +156,8 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
     const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", { url: popupUrl, background: true });
     const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "browserControl popup target");
 
-    const probe = await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `new Promise((resolve) => {
-        const probeSocket = new WebSocket("wss://localhost:8787/extension");
-        const timer = setTimeout(() => resolve({ok:false, timeout:true, readyState:probeSocket.readyState}), 3000);
-        probeSocket.onopen = () => { clearTimeout(timer); probeSocket.close(1000, "probe"); resolve({ok:true}); };
-        probeSocket.onerror = () => { clearTimeout(timer); resolve({ok:false, error:true, readyState:probeSocket.readyState}); };
-      })`,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (!probe.result?.value?.ok) {
+    const probe = await evaluateWebSocketProbe(popup.webSocketDebuggerUrl, "wss://localhost:8787/extension");
+    if (!probe.value?.ok) {
       throw new Error(`Extension-page secure WebSocket probe failed: ${JSON.stringify(probe)}`);
     }
 
