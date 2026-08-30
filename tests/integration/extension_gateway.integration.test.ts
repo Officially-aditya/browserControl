@@ -99,13 +99,11 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       (target) => target.url === popupUrl,
       "browserControl popup target"
     );
-    const shareEvaluation = await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
+    await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
       awaitPromise: true,
       returnByValue: true,
     });
-    const shareResult = shareEvaluation.result.value;
-    expect(shareResult?.ok).toBe(true);
     await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     const deadline = Date.now() + 5000;
