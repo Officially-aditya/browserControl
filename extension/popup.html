@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>browserControl</title>
+  <style>
+    body{font:13px system-ui,sans-serif;width:320px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}label{display:block;font-size:11px;color:#666;margin:10px 0 4px}input{box-sizing:border-box;width:100%;padding:8px;border:1px solid #ccc;border-radius:7px}button{padding:8px 10px;border:1px solid #bbb;border-radius:7px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}.row{display:flex;gap:8px;margin-top:12px}.status{padding:8px 10px;border-radius:7px;background:#f3f3f3;margin-bottom:10px}.muted{color:#666;font-size:11px;margin-top:8px}.grow{flex:1}
+  </style>
+</head>
+<body>
+  <h1>browserControl</h1>
+  <div id="status" class="status">Loading…</div>
+  <label for="gateway">Gateway WebSocket</label>
+  <input id="gateway" placeholder="wss://gateway.example.com/extension" />
+  <label for="token">Device token</label>
+  <input id="token" type="password" placeholder="pairing/device token" />
+  <div class="row"><button id="save" class="primary grow">Save & connect</button></div>
+  <div class="row"><button id="share" class="grow">Share active tab</button><button id="pause" class="grow">Pause</button></div>
+  <div class="row"><button id="disconnect" class="grow">Disconnect</button></div>
+  <div class="muted">Only the tab you explicitly share is attached to the Chrome debugger. Pause or disconnect at any time.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
