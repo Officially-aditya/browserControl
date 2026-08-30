@@ -70,6 +70,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     chrome = await launchRealChrome({
       windowSize: "1280,800",
       headless: false,
+      disableBackgroundNetworking: false,
       extraArgs: [
         `--disable-extensions-except=${extensionDir}`,
         `--load-extension=${extensionDir}`,
