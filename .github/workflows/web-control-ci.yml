@@ -10,6 +10,7 @@ on:
       - 'extension/**'
       - 'tests/remote/**'
       - 'tests/integration/extension_gateway.integration.test.ts'
+      - 'tests/helpers/chrome-launcher.ts'
       - 'package*.json'
       - 'tsconfig.json'
 
@@ -31,4 +32,4 @@ jobs:
       - run: npm run build
       - run: npm run test:web
       - name: Real Chrome extension → gateway → MCP canary
-        run: npx vitest run tests/integration/extension_gateway.integration.test.ts
+        run: xvfb-run -a npx vitest run tests/integration/extension_gateway.integration.test.ts
