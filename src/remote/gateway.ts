@@ -117,6 +117,17 @@ const POINT_PROPERTIES = {
   observationId: { type: "string" },
   x: { type: "number", minimum: 0, maximum: 1000 },
   y: { type: "number", minimum: 0, maximum: 1000 },
+} as const;
+
+type ToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: {
+    readonly type: "object";
+    readonly properties?: Record<string, unknown>;
+    readonly required?: readonly string[];
+    readonly additionalProperties?: boolean;
+  };
 };
 
 function toolError(error: any) {
@@ -147,7 +158,7 @@ function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
-function tools() {
+function tools(): ToolDefinition[] {
   return [
     {
       name: "browser_status",
@@ -158,7 +169,7 @@ function tools() {
       name: "browser_observe",
       description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values and coordinate actions must reference the returned observationId.",
       inputSchema: {
-        type: "object",
+        type: "object" as const,
         properties: {
           format: { type: "string", enum: ["jpeg", "png", "webp"], default: "jpeg" },
           quality: { type: "number", minimum: 1, maximum: 100, default: 82 },
@@ -170,7 +181,7 @@ function tools() {
       name: "browser_inspect",
       description: "Capture a higher-detail sub-region of an observation. The returned crop has its own normalized 0-1000 coordinate space mapped back to the source viewport.",
       inputSchema: {
-        type: "object",
+        type: "object" as const,
         properties: {
           observationId: { type: "string" },
           x: { type: "number", minimum: 0, maximum: 1000 },
@@ -187,13 +198,13 @@ function tools() {
     {
       name: "browser_move",
       description: "Move/hover at normalized coordinates from a specific observation.",
-      inputSchema: { type: "object", properties: POINT_PROPERTIES, required: ["observationId", "x", "y"], additionalProperties: false },
+      inputSchema: { type: "object" as const, properties: POINT_PROPERTIES, required: ["observationId", "x", "y"], additionalProperties: false },
     },
     {
       name: "browser_click",
       description: "Click at normalized coordinates from a specific observation. Stale observations are rejected.",
       inputSchema: {
-        type: "object",
+        type: "object" as const,
         properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } },
         required: ["observationId", "x", "y"],
         additionalProperties: false,
@@ -203,7 +214,7 @@ function tools() {
       name: "browser_double_click",
       description: "Double-click at normalized coordinates from a specific observation.",
       inputSchema: {
-        type: "object",
+        type: "object" as const,
         properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } },
         required: ["observationId", "x", "y"],
         additionalProperties: false,
@@ -213,7 +224,7 @@ function tools() {
       name: "browser_drag",
       description: "Drag through a normalized waypoint path planned against one observation.",
       inputSchema: {
-        type: "object",
+        type: "object" as const,
         properties: {
           observationId: { type: "string" },
           path: {
@@ -238,7 +249,7 @@ function tools() {
       name: "browser_scroll",
       description: "Scroll at normalized coordinates using CSS-pixel wheel deltas.",
       inputSchema: {
-        type: "object",
+        type: "object" as const,
         properties: {
           observationId: { type: "string" },
           x: { type: "number", minimum: 0, maximum: 1000, default: 500 },
@@ -250,17 +261,17 @@ function tools() {
         additionalProperties: false,
       },
     },
-    { name: "browser_type", description: "Insert text into the focused element in the shared tab.", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false } },
-    { name: "browser_keypress", description: "Send a keyboard shortcut.", inputSchema: { type: "object", properties: { keys: { type: "array", minItems: 1, items: { type: "string" } } }, required: ["keys"], additionalProperties: false } },
-    { name: "browser_navigate", description: "Navigate the shared tab to an absolute URL.", inputSchema: { type: "object", properties: { url: { type: "string", format: "uri" } }, required: ["url"], additionalProperties: false } },
+    { name: "browser_type", description: "Insert text into the focused element in the shared tab.", inputSchema: { type: "object" as const, properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false } },
+    { name: "browser_keypress", description: "Send a keyboard shortcut.", inputSchema: { type: "object" as const, properties: { keys: { type: "array", minItems: 1, items: { type: "string" } } }, required: ["keys"], additionalProperties: false } },
+    { name: "browser_navigate", description: "Navigate the shared tab to an absolute URL.", inputSchema: { type: "object" as const, properties: { url: { type: "string", format: "uri" } }, required: ["url"], additionalProperties: false } },
     { name: "browser_back", description: "Navigate backward in history.", inputSchema: EMPTY_SCHEMA },
     { name: "browser_forward", description: "Navigate forward in history.", inputSchema: EMPTY_SCHEMA },
     { name: "browser_reload", description: "Reload the shared tab.", inputSchema: EMPTY_SCHEMA },
     { name: "browser_tabs", description: "List Chrome tabs visible to browserControl. Read-only.", inputSchema: EMPTY_SCHEMA },
-    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs.", inputSchema: { type: "object", properties: { targetId: { type: "string" } }, required: ["targetId"], additionalProperties: false } },
-    { name: "browser_new_tab", description: "Create a new tab and share it for control.", inputSchema: { type: "object", properties: { url: { type: "string", format: "uri" } }, additionalProperties: false } },
-    { name: "browser_close_tab", description: "Close a tab. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object", properties: { targetId: { type: "string" } }, additionalProperties: false } },
-    { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog.", inputSchema: { type: "object", properties: { accept: { type: "boolean" }, promptText: { type: "string" } }, required: ["accept"], additionalProperties: false } },
+    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs.", inputSchema: { type: "object" as const, properties: { targetId: { type: "string" } }, required: ["targetId"], additionalProperties: false } },
+    { name: "browser_new_tab", description: "Create a new tab and share it for control.", inputSchema: { type: "object" as const, properties: { url: { type: "string", format: "uri" } }, additionalProperties: false } },
+    { name: "browser_close_tab", description: "Close a tab. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { targetId: { type: "string" } }, additionalProperties: false } },
+    { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog.", inputSchema: { type: "object" as const, properties: { accept: { type: "boolean" }, promptText: { type: "string" } }, required: ["accept"], additionalProperties: false } },
     { name: "browser_release_control", description: "Release this client's exclusive interactive-control lease.", inputSchema: EMPTY_SCHEMA },
   ];
 }
