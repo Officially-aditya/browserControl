@@ -32,7 +32,6 @@ class ExtensionBridge {
       this.socket.close(4001, "Replaced by newer browserControl extension connection");
     }
     this.socket = socket;
-
     socket.on("message", (raw) => {
       let message: ExtensionRpcResponse | { type?: string };
       try {
@@ -45,15 +44,13 @@ class ExtensionBridge {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(message.id);
-      if (message.ok) {
-        pending.resolve(message.result);
-      } else {
+      if (message.ok) pending.resolve(message.result);
+      else {
         const error = new Error(message.error?.message || "Extension RPC failed");
         (error as any).code = message.error?.code || "EXTENSION_RPC_ERROR";
         pending.reject(error);
       }
     });
-
     socket.on("close", () => {
       if (this.socket === socket) this.socket = null;
       for (const [id, pending] of this.pending) {
@@ -75,7 +72,6 @@ class ExtensionBridge {
       (error as any).code = "DEVICE_OFFLINE";
       throw error;
     }
-
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -93,7 +89,6 @@ class ExtensionBridge {
 class ControlLease {
   private owner: string | null = null;
   private expiresAt = 0;
-
   constructor(private readonly ttlMs = 60_000) {}
 
   public acquire(owner: string): boolean {
@@ -122,6 +117,13 @@ class ControlLease {
   }
 }
 
+const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false } as const;
+const POINT_PROPERTIES = {
+  observationId: { type: "string" },
+  x: { type: "number", minimum: 0, maximum: 1000 },
+  y: { type: "number", minimum: 0, maximum: 1000 },
+};
+
 function toolError(error: any) {
   return {
     content: [
@@ -138,13 +140,23 @@ function toolError(error: any) {
   };
 }
 
+function imageResult(observation: any) {
+  const { image, mimeType, ...metadata } = observation;
+  return {
+    content: [
+      { type: "text" as const, text: JSON.stringify(metadata, null, 2) },
+      { type: "image" as const, data: image, mimeType },
+    ],
+  };
+}
+
 async function createGatewayMcpServer(
   bridge: ExtensionBridge,
   lease: ControlLease,
   clientId: string
 ): Promise<Server> {
   const server = new Server(
-    { name: "browser-control-remote", version: "0.1.0" },
+    { name: "browser-control-remote", version: "0.2.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -152,12 +164,12 @@ async function createGatewayMcpServer(
     tools: [
       {
         name: "browser_status",
-        description: "Check whether the user's browserControl Chrome extension is connected and whether another client holds the control lease.",
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        description: "Check browserControl extension connectivity, shared-tab state, pause state, and exclusive-control lease status.",
+        inputSchema: EMPTY_SCHEMA,
       },
       {
         name: "browser_observe",
-        description: "Capture the currently shared Chrome tab. Coordinates for subsequent actions use normalized 0-1000 x/y values and must reference the returned observationId.",
+        description: "Capture the currently shared Chrome tab. All model-facing coordinates use normalized 0-1000 x/y values. Coordinate actions must reference the returned observationId.",
         inputSchema: {
           type: "object",
           properties: {
@@ -168,23 +180,76 @@ async function createGatewayMcpServer(
         },
       },
       {
-        name: "browser_click",
-        description: "Click the shared Chrome tab at normalized screenshot coordinates. Requires the observationId the click was planned from; stale observations are rejected instead of clicking the wrong place.",
+        name: "browser_inspect",
+        description: "Capture a higher-detail sub-region of an existing observation. The returned region observation has its own normalized 0-1000 coordinate space, and actions planned from it map back to the original viewport.",
         inputSchema: {
           type: "object",
           properties: {
             observationId: { type: "string" },
             x: { type: "number", minimum: 0, maximum: 1000 },
             y: { type: "number", minimum: 0, maximum: 1000 },
-            button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
+            width: { type: "number", exclusiveMinimum: 0, maximum: 1000 },
+            height: { type: "number", exclusiveMinimum: 0, maximum: 1000 },
+            format: { type: "string", enum: ["jpeg", "png", "webp"], default: "png" },
+            quality: { type: "number", minimum: 1, maximum: 100, default: 90 },
           },
+          required: ["observationId", "x", "y", "width", "height"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "browser_move",
+        description: "Move/hover the cursor to normalized coordinates from a specific observation.",
+        inputSchema: { type: "object", properties: POINT_PROPERTIES, required: ["observationId", "x", "y"], additionalProperties: false },
+      },
+      {
+        name: "browser_click",
+        description: "Click at normalized coordinates from a specific observation. Stale observations are rejected instead of clicking the wrong place.",
+        inputSchema: {
+          type: "object",
+          properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } },
           required: ["observationId", "x", "y"],
           additionalProperties: false,
         },
       },
       {
+        name: "browser_double_click",
+        description: "Double-click at normalized coordinates from a specific observation.",
+        inputSchema: {
+          type: "object",
+          properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } },
+          required: ["observationId", "x", "y"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "browser_drag",
+        description: "Drag through a normalized waypoint path planned against one observation.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            observationId: { type: "string" },
+            path: {
+              type: "array",
+              minItems: 2,
+              items: {
+                type: "object",
+                properties: {
+                  x: { type: "number", minimum: 0, maximum: 1000 },
+                  y: { type: "number", minimum: 0, maximum: 1000 },
+                },
+                required: ["x", "y"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["observationId", "path"],
+          additionalProperties: false,
+        },
+      },
+      {
         name: "browser_scroll",
-        description: "Scroll the shared Chrome tab at normalized coordinates using CSS-pixel wheel deltas.",
+        description: "Scroll at normalized coordinates using CSS-pixel wheel deltas.",
         inputSchema: {
           type: "object",
           properties: {
@@ -200,54 +265,51 @@ async function createGatewayMcpServer(
       },
       {
         name: "browser_type",
-        description: "Insert text into the currently focused element of the shared tab.",
-        inputSchema: {
-          type: "object",
-          properties: { text: { type: "string" } },
-          required: ["text"],
-          additionalProperties: false,
-        },
+        description: "Insert text into the focused element in the shared tab.",
+        inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
       },
       {
         name: "browser_keypress",
         description: "Send a keyboard shortcut such as [\"Meta\",\"A\"] or [\"Control\",\"L\"].",
-        inputSchema: {
-          type: "object",
-          properties: { keys: { type: "array", minItems: 1, items: { type: "string" } } },
-          required: ["keys"],
-          additionalProperties: false,
-        },
+        inputSchema: { type: "object", properties: { keys: { type: "array", minItems: 1, items: { type: "string" } } }, required: ["keys"], additionalProperties: false },
       },
       {
         name: "browser_navigate",
-        description: "Navigate the currently shared tab to an absolute URL.",
-        inputSchema: {
-          type: "object",
-          properties: { url: { type: "string", format: "uri" } },
-          required: ["url"],
-          additionalProperties: false,
-        },
+        description: "Navigate the shared tab to an absolute URL.",
+        inputSchema: { type: "object", properties: { url: { type: "string", format: "uri" } }, required: ["url"], additionalProperties: false },
       },
-      {
-        name: "browser_tabs",
-        description: "List Chrome tabs visible to the browserControl extension. This is read-only.",
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      },
+      { name: "browser_back", description: "Navigate the shared tab backward in history.", inputSchema: EMPTY_SCHEMA },
+      { name: "browser_forward", description: "Navigate the shared tab forward in history.", inputSchema: EMPTY_SCHEMA },
+      { name: "browser_reload", description: "Reload the shared tab.", inputSchema: EMPTY_SCHEMA },
+      { name: "browser_tabs", description: "List Chrome tabs visible to browserControl. Read-only.", inputSchema: EMPTY_SCHEMA },
       {
         name: "browser_switch_tab",
-        description: "Switch browserControl to another tab returned by browser_tabs. This changes which tab is shared for control.",
+        description: "Switch browserControl to a tab returned by browser_tabs.",
+        inputSchema: { type: "object", properties: { targetId: { type: "string" } }, required: ["targetId"], additionalProperties: false },
+      },
+      {
+        name: "browser_new_tab",
+        description: "Create a new tab and share it for control.",
+        inputSchema: { type: "object", properties: { url: { type: "string", format: "uri" } }, additionalProperties: false },
+      },
+      {
+        name: "browser_close_tab",
+        description: "Close a tab. If targetId is omitted, closes the currently shared tab.",
+        inputSchema: { type: "object", properties: { targetId: { type: "string" } }, additionalProperties: false },
+      },
+      {
+        name: "browser_handle_dialog",
+        description: "Accept or dismiss the active JavaScript alert/confirm/prompt dialog.",
         inputSchema: {
           type: "object",
-          properties: { targetId: { type: "string" } },
-          required: ["targetId"],
+          properties: { accept: { type: "boolean" }, promptText: { type: "string" } },
+          required: ["accept"],
           additionalProperties: false,
         },
       },
-      {
-        name: "browser_release_control",
-        description: "Release this MCP session's exclusive interactive-control lease.",
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      },
+      { name: "browser_pause", description: "Pause remote browser actions locally. Only status/resume remain available until resumed.", inputSchema: EMPTY_SCHEMA },
+      { name: "browser_resume", description: "Resume browserControl after a pause.", inputSchema: EMPTY_SCHEMA },
+      { name: "browser_release_control", description: "Release this MCP session's exclusive interactive-control lease.", inputSchema: EMPTY_SCHEMA },
     ],
   }));
 
@@ -260,6 +322,8 @@ async function createGatewayMcpServer(
     return bridge.call(method, params);
   };
 
+  const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const args = (request.params.arguments || {}) as Record<string, any>;
     try {
@@ -267,37 +331,31 @@ async function createGatewayMcpServer(
         case "browser_status": {
           const extension = bridge.connected ? await bridge.call("status") : { connected: false };
           const currentLease = lease.status();
-          return {
-            content: [{ type: "text", text: JSON.stringify({ extension, lease: { busy: !!currentLease.owner && currentLease.owner !== clientId, expiresAt: currentLease.expiresAt } }) }],
-          };
+          return text({ extension, lease: { busy: !!currentLease.owner && currentLease.owner !== clientId, expiresAt: currentLease.expiresAt } });
         }
-        case "browser_observe": {
-          const observation = await bridge.call("observe", args);
-          const { image, mimeType, ...metadata } = observation;
-          return {
-            content: [
-              { type: "text", text: JSON.stringify(metadata, null, 2) },
-              { type: "image", data: image, mimeType },
-            ],
-          };
-        }
-        case "browser_click":
-          return { content: [{ type: "text", text: JSON.stringify(await mutate("click", args)) }] };
-        case "browser_scroll":
-          return { content: [{ type: "text", text: JSON.stringify(await mutate("scroll", args)) }] };
-        case "browser_type":
-          return { content: [{ type: "text", text: JSON.stringify(await mutate("type", args)) }] };
-        case "browser_keypress":
-          return { content: [{ type: "text", text: JSON.stringify(await mutate("keypress", args)) }] };
-        case "browser_navigate":
-          return { content: [{ type: "text", text: JSON.stringify(await mutate("navigate", args)) }] };
-        case "browser_tabs":
-          return { content: [{ type: "text", text: JSON.stringify(await bridge.call("tabs"), null, 2) }] };
-        case "browser_switch_tab":
-          return { content: [{ type: "text", text: JSON.stringify(await mutate("switch_tab", args)) }] };
+        case "browser_observe": return imageResult(await bridge.call("observe", args));
+        case "browser_inspect": return imageResult(await bridge.call("inspect_region", args));
+        case "browser_move": return text(await mutate("move", args));
+        case "browser_click": return text(await mutate("click", args));
+        case "browser_double_click": return text(await mutate("double_click", args));
+        case "browser_drag": return text(await mutate("drag", args));
+        case "browser_scroll": return text(await mutate("scroll", args));
+        case "browser_type": return text(await mutate("type", args));
+        case "browser_keypress": return text(await mutate("keypress", args));
+        case "browser_navigate": return text(await mutate("navigate", args));
+        case "browser_back": return text(await mutate("back", args));
+        case "browser_forward": return text(await mutate("forward", args));
+        case "browser_reload": return text(await mutate("reload", args));
+        case "browser_tabs": return text(await bridge.call("tabs"));
+        case "browser_switch_tab": return text(await mutate("switch_tab", args));
+        case "browser_new_tab": return text(await mutate("new_tab", args));
+        case "browser_close_tab": return text(await mutate("close_tab", args));
+        case "browser_handle_dialog": return text(await mutate("handle_dialog", args));
+        case "browser_pause": return text(await mutate("pause", args));
+        case "browser_resume": return text(await mutate("resume", args));
         case "browser_release_control":
           lease.release(clientId);
-          return { content: [{ type: "text", text: JSON.stringify({ success: true }) }] };
+          return text({ success: true });
         default:
           throw new Error(`Unknown tool: ${request.params.name}`);
       }
@@ -326,6 +384,12 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
   const lease = new ControlLease(options.leaseTtlMs ?? 60_000);
   const transports = new Map<string, { transport: StreamableHTTPServerTransport; mcpServer: Server; clientId: string }>();
 
+  const authorizedMcpRequest = (req: http.IncomingMessage, url: URL) => {
+    if (!mcpBearerToken) return true;
+    const auth = req.headers.authorization || "";
+    return auth === `Bearer ${mcpBearerToken}` || url.searchParams.get("token") === mcpBearerToken;
+  };
+
   const httpServer = http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname === "/health") {
@@ -337,14 +401,10 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
       res.writeHead(404).end("Not found");
       return;
     }
-
-    if (mcpBearerToken) {
-      const auth = req.headers.authorization || "";
-      if (auth !== `Bearer ${mcpBearerToken}`) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Unauthorized" }));
-        return;
-      }
+    if (!authorizedMcpRequest(req, url)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
     }
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
@@ -369,11 +429,19 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
     }
 
     let raw = "";
+    let tooLarge = false;
     req.on("data", (chunk) => {
+      if (tooLarge) return;
       raw += chunk;
-      if (raw.length > 2 * 1024 * 1024) req.destroy();
+      if (Buffer.byteLength(raw) > 2 * 1024 * 1024) {
+        tooLarge = true;
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Payload too large" }));
+        req.resume();
+      }
     });
     req.on("end", async () => {
+      if (tooLarge) return;
       try {
         const body = raw ? JSON.parse(raw) : undefined;
         if (sessionId) {
@@ -386,7 +454,6 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
           await entry.transport.handleRequest(req, res, body);
           return;
         }
-
         if (!isInitializeRequest(body)) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Expected MCP initialize request" }));
@@ -394,6 +461,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
         }
 
         const clientId = randomUUID();
+        const mcpServer = await createGatewayMcpServer(bridge, lease, clientId);
         let transport!: StreamableHTTPServerTransport;
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
@@ -405,7 +473,6 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
           lease.release(clientId);
           if (transport.sessionId) transports.delete(transport.sessionId);
         };
-        const mcpServer = await createGatewayMcpServer(bridge, lease, clientId);
         await mcpServer.connect(transport);
         await transport.handleRequest(req, res, body);
       } catch (error: any) {
@@ -438,9 +505,11 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}) {
     httpServer.listen(port, host, () => resolve());
   });
 
-  console.log(`[browserControl] Remote gateway listening on http://${host}:${port}`);
-  console.log(`[browserControl] MCP endpoint: http://${host}:${port}/mcp`);
-  console.log(`[browserControl] Extension endpoint: ws://${host}:${port}/extension`);
+  const address = httpServer.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  console.log(`[browserControl] Remote gateway listening on http://${host}:${actualPort}`);
+  console.log(`[browserControl] MCP endpoint: http://${host}:${actualPort}/mcp`);
+  console.log(`[browserControl] Extension endpoint: ws://${host}:${actualPort}/extension`);
 
   return { httpServer, wss, bridge };
 }
