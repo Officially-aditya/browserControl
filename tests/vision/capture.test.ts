@@ -55,6 +55,27 @@ describe("Adaptive Vision Capture Service", () => {
     expect(frame.image).toBeTruthy();
   });
 
+  it("should reduce overview pixels when a long-edge budget is configured", async () => {
+    const native = await controller.observe({ format: "png" });
+    const reducedService = new VisionCaptureService(controller, {
+      overviewFormat: "webp",
+      overviewQuality: 80,
+      overviewLongEdge: 640,
+    });
+    const { observation, frame } = await reducedService.captureOverview();
+
+    expect(Math.max(frame.width, frame.height)).toBeLessThanOrEqual(641);
+    expect(frame.width * frame.height).toBeLessThan(native.imageWidth * native.imageHeight);
+    expect(frame.sourceRegion).toEqual({
+      x: 0,
+      y: 0,
+      width: observation.imageWidth,
+      height: observation.imageHeight,
+    });
+    expect(observation.coordinateSpace.scaleX).toBeGreaterThan(0);
+    expect(observation.coordinateSpace.scaleY).toBeGreaterThan(0);
+  });
+
   it("should capture a high-detail clipped region frame for normalized sub-region", async () => {
     const { frame: overviewFrame } = await captureService.captureOverview();
 

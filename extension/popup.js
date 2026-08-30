@@ -6,7 +6,7 @@ async function call(message) {
 
 async function refresh() {
   const state = await call({ type: "getStatus" });
-  $("gateway").value = state.gatewayUrl || "ws://127.0.0.1:8787/extension";
+  $("gateway").value = state.gatewayUrl || "";
   $("token").value = state.deviceToken || "";
   const connected = state.status === "connected";
   const paused = !!state.paused;

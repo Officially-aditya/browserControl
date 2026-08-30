@@ -136,6 +136,7 @@ describe("VisionAgent Runtime With Deterministic Fake Model", () => {
   });
 
   it("3. should handle policy denials gracefully", async () => {
+    const urlBefore = controller.session.currentUrl;
     const fakeModel = new ScriptedFakeModel([
       {
         type: "browser_action",
@@ -168,6 +169,7 @@ describe("VisionAgent Runtime With Deterministic Fake Model", () => {
     });
 
     expect(result.success).toBe(true);
+    expect(controller.session.currentUrl).toBe(urlBefore);
   });
 
   it("4. should stop when maximum steps limit is exceeded", async () => {

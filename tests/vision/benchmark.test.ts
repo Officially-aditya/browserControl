@@ -34,6 +34,8 @@ describe("Vision Runtime Benchmark Suite (10 Tasks)", () => {
     // Assert that adaptive mode reduces total bytes sent by at least 40%
     expect(report.summary.overallByteReductionPercent).toBeGreaterThan(40);
     expect(report.summary.totalAdaptiveBytes).toBeLessThan(report.summary.totalNativeBytes);
+    expect(report.summary.overallPixelReductionPercent).toBeGreaterThan(0);
+    expect(report.summary.totalAdaptivePixels).toBeLessThan(report.summary.totalNativePixels);
 
     // Verify all 10 tasks are present and succeeded in both modes
     for (const t of report.tasks) {

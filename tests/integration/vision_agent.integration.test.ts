@@ -146,6 +146,45 @@ describe("Live Chrome Vision Runtime Integration Suite", () => {
     expect(state.rightClicks).toBeGreaterThanOrEqual(1);
   }, 20000);
 
+  it("Case 2b: should map nested region inspections back to the original observation", async () => {
+    await controller.navigationController.navigate(`${server.url}/interactive.html`);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const model = new ScriptedVisionModel([
+      {
+        type: "inspect_region",
+        region: { x: 20, y: 80, width: 200, height: 200 },
+        certainty: "uncertain",
+        reasoning: "Inspect the first card",
+      },
+      {
+        type: "inspect_region",
+        region: { x: 200, y: 300, width: 300, height: 300 },
+        certainty: "uncertain",
+        reasoning: "Inspect the button inside the card crop",
+      },
+      {
+        type: "computer_action",
+        action: { type: "click", x: 133, y: 187, button: "left" },
+        certainty: "certain",
+        intent: "click the button inside the nested crop",
+      },
+      { type: "done", success: true, result: "Nested crop click completed" },
+    ]);
+
+    const agent = new VisionAgent({ controller, model });
+    const result = await agent.run({
+      objective: "Inspect a card, inspect its button, then click it",
+      maxSteps: 8,
+    });
+
+    expect(result.success).toBe(true);
+    expect(model.history[1].frames[0].kind).toBe("region");
+    expect(model.history[2].frames[0].kind).toBe("region");
+    const state = await evaluateInPage<any>("window.__STATE__");
+    expect(state.clicks).toBeGreaterThanOrEqual(1);
+  }, 20000);
+
   // ===========================================================================
   // Case 3: Type Text Flow
   // ===========================================================================

@@ -52,10 +52,12 @@ export class VisionCaptureService {
     const format = options?.overviewFormat || this.config.overviewFormat || "webp";
     const quality = options?.overviewQuality || this.config.overviewQuality || 85;
     const showCursor = options?.showCursor ?? this.config.showCursor ?? false;
+    const overviewLongEdge = options?.overviewLongEdge ?? this.config.overviewLongEdge;
 
     const observation = await this.controller.observe({
       format,
       quality,
+      maxImageLongEdge: overviewLongEdge,
       showCursor,
     });
 

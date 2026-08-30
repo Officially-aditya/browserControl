@@ -9,6 +9,8 @@ import { Observation, CursorPosition } from "../protocol/results.js";
 export interface ScreenshotOptions {
   format?: "png" | "jpeg" | "webp";
   quality?: number;
+  /** Maximum encoded image long edge. The viewport remains authoritative for coordinate mapping. */
+  maxImageLongEdge?: number;
   optimizeForSpeed?: boolean;
   showCursor?: boolean;
 }
@@ -140,6 +142,11 @@ export class ScreenshotService {
 
     const cssViewportWidth = Math.round(visual.clientWidth);
     const cssViewportHeight = Math.round(visual.clientHeight);
+    const nativeLongEdge = Math.max(cssViewportWidth, cssViewportHeight) * metrics.devicePixelRatio;
+    const requestedLongEdge = options.maxImageLongEdge;
+    const scale = requestedLongEdge && requestedLongEdge > 0
+      ? Math.min(1, requestedLongEdge / nativeLongEdge)
+      : 1;
 
     const captureParams: any = {
       format,
@@ -150,7 +157,7 @@ export class ScreenshotService {
         y: visual.pageY,
         width: visual.clientWidth,
         height: visual.clientHeight,
-        scale: 1,
+        scale,
       },
     };
 

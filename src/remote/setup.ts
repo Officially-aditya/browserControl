@@ -29,11 +29,13 @@ export async function setupRemoteGateway(outputPath = path.resolve(process.cwd()
   console.log(`Environment file: ${outputPath}`);
   console.log("");
   console.log("Chrome extension configuration:");
-  console.log("  Gateway WebSocket: ws://127.0.0.1:8787/extension");
+  console.log("  Gateway WebSocket (local development only): ws://127.0.0.1:8787/extension");
+  console.log("  Deployed gateway WebSocket:               wss://YOUR_GATEWAY_HOST/extension");
   console.log(`  Device token:       ${deviceToken}`);
   console.log("");
   console.log("Local MCP endpoint:");
   console.log(`  http://127.0.0.1:8787/mcp?token=${encodeURIComponent(mcpToken)}`);
+  console.log("  Use HTTPS/WSS and the Authorization header for a deployed gateway.");
   console.log("");
   console.log("Start the gateway with:");
   if (process.platform === "win32") {

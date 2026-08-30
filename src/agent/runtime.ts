@@ -125,10 +125,8 @@ export class VisionAgent {
             currentOverviewFrame = frame;
             metrics.recordFrameCaptured("overview");
           }
-          const regionFrame = await this.captureService.captureRegion(
-            step.region!,
-            currentOverviewFrame!
-          );
+          const sourceFrame = currentActiveFrame ?? currentOverviewFrame!;
+          const regionFrame = await this.captureService.captureRegion(step.region!, sourceFrame);
           currentActiveFrame = regionFrame;
           metrics.recordFrameCaptured("region");
           planner.onFrameCaptured(regionFrame);
@@ -178,68 +176,63 @@ export class VisionAgent {
           }
 
           const decision = step.decision;
+          if (decision.type !== "computer_action" && decision.type !== "browser_action") {
+            break;
+          }
 
-          if (decision.type === "computer_action") {
-            const policyEval = await this.policy.evaluate(decision.action, {
-              objective: options.objective,
-              certainty: decision.certainty || "certain",
-              currentUrl: this.controller.session.currentUrl || undefined,
+          const policyContext: ActionPolicyContext = {
+            objective: options.objective,
+            certainty: decision.certainty || "certain",
+            currentUrl: this.controller.session.currentUrl || undefined,
+            stepIndex: planner.currentStep,
+            frameKind: currentActiveFrame.kind,
+            recentActionsCount: memory.totalSteps,
+          };
+          const policyEval = await this.policy.evaluate(decision.action, policyContext);
+
+          if (policyEval === "deny") {
+            memory.recordStep({
               stepIndex: planner.currentStep,
-              frameKind: currentActiveFrame.kind,
-              recentActionsCount: memory.totalSteps,
+              actionDescription: `Policy denied action: ${decision.action.type}`,
+              intent: decision.intent,
+              success: false,
+              error: "POLICY_DENIED",
             });
-
-            if (policyEval === "deny") {
-              memory.recordStep({
-                stepIndex: planner.currentStep,
-                actionDescription: `Policy denied action: ${decision.action.type}`,
-                intent: decision.intent,
+            metrics.recordAction(false, 0, "POLICY_DENIED");
+            planner.onActionResult(
+              {
+                id: "policy_deny",
                 success: false,
-                error: "POLICY_DENIED",
-              });
-              metrics.recordAction(false, 0, "POLICY_DENIED");
-              planner.onActionResult(
-                {
-                  id: "policy_deny",
-                  success: false,
-                  action: decision.action.type,
-                  error: "Action denied by policy",
-                  durationMs: 0,
-                },
-                decision.action
-              );
-              break;
-            }
+                action: decision.action.type,
+                error: "Action denied by policy",
+                durationMs: 0,
+              },
+              decision.action
+            );
+            break;
+          }
 
-            if (policyEval === "require_confirmation") {
-              const policyContext: ActionPolicyContext = {
-                objective: options.objective,
-                certainty: decision.certainty || "certain",
-                currentUrl: this.controller.session.currentUrl || undefined,
+          if (policyEval === "require_confirmation") {
+            return {
+              success: false,
+              objective: options.objective,
+              totalSteps: planner.currentStep,
+              error: "CONFIRMATION_REQUIRED",
+              durationMs: Date.now() - startTime,
+              metrics: metrics.getMetrics(),
+              pendingConfirmation: {
+                action: decision.action,
+                decision,
+                reason: `Policy requires confirmation for ${decision.action.type}`,
+                policyContext,
                 stepIndex: planner.currentStep,
-                frameKind: currentActiveFrame.kind,
-                recentActionsCount: memory.totalSteps,
-              };
-              return {
-                success: false,
-                objective: options.objective,
-                totalSteps: planner.currentStep,
-                error: "CONFIRMATION_REQUIRED",
-                durationMs: Date.now() - startTime,
                 metrics: metrics.getMetrics(),
-                pendingConfirmation: {
-                  action: decision.action,
-                  decision,
-                  reason: `Policy requires confirmation for ${decision.action.type}`,
-                  policyContext,
-                  stepIndex: planner.currentStep,
-                  metrics: metrics.getMetrics(),
-                },
-              };
-            }
+              },
+            };
+          }
 
-            if (policyEval === "inspect" && currentActiveFrame.kind === "overview" && "x" in decision.action) {
-              // Trigger inspection around target coordinate
+          if (policyEval === "inspect") {
+            if (decision.type === "computer_action" && currentActiveFrame.kind === "overview" && "x" in decision.action) {
               planner.onDecisionReceived({
                 type: "inspect_region",
                 region: {
@@ -251,10 +244,24 @@ export class VisionAgent {
                 certainty: "uncertain",
                 reasoning: "Policy requested inspection before action execution",
               });
-              break;
+            } else {
+              // Inspection is meaningful only for coordinate actions. Never silently
+              // turn an inspection request for a browser action into execution.
+              const result: ActionResult = {
+                id: "policy_inspect_unavailable",
+                success: false,
+                action: decision.action.type,
+                errorCode: "INVALID_ACTION",
+                error: "Policy requested visual inspection, but this action has no spatial target",
+                durationMs: 0,
+              };
+              metrics.recordAction(false, 0, result.errorCode);
+              planner.onActionResult(result, decision.action);
             }
+            break;
+          }
 
-            // Map normalized coordinates into observation coordinates
+          if (decision.type === "computer_action") {
             const executableAction = VisionFrameMapper.mapNormalizedComputerAction(
               decision.action,
               currentActiveFrame
@@ -277,7 +284,7 @@ export class VisionAgent {
             });
 
             planner.onActionResult(result, decision.action);
-          } else if (decision.type === "browser_action") {
+          } else {
             const actStart = Date.now();
             const result = await this.controller.executeBrowserAction(decision.action);
             const actDuration = result.durationMs || (Date.now() - actStart);

@@ -107,7 +107,14 @@ async function waitForTarget(port: number, predicate: (target: any) => boolean, 
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
+const canaryConfigured = Boolean(
+  process.env.CHROME_PATH &&
+  process.env.BROWSERCONTROL_TEST_TLS_KEY &&
+  process.env.BROWSERCONTROL_TEST_TLS_CERT &&
+  process.env.BROWSERCONTROL_TEST_TLS_SPKI
+);
+
+describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP canary", () => {
   let chrome: LaunchedChrome;
   let fixture: TestServer;
   let controller: ChromeController;
@@ -129,7 +136,7 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
     gateway = await runGatewayRuntime({
       host: "localhost",
       port: 8787,
-      extensionToken: "",
+      extensionToken: "extension-canary-device-token",
       mcpBearerToken: "extension-canary-token",
       heartbeatIntervalMs: 2_000,
       heartbeatTimeoutMs: 8_000,
@@ -180,14 +187,17 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
     const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "real browserControl action popup");
     popupTargetId = popup.id;
 
-    const probe = await evaluateWebSocketProbe(popup.webSocketDebuggerUrl, "wss://localhost:8787/extension");
+    const probe = await evaluateWebSocketProbe(
+      popup.webSocketDebuggerUrl,
+      "wss://localhost:8787/extension?token=extension-canary-device-token"
+    );
     if (!probe.value?.ok) {
       throw new Error(`Extension-page secure WebSocket probe failed: ${JSON.stringify(probe)}`);
     }
 
     const saved = await runtimeMessage(popup.webSocketDebuggerUrl, {
       type: "saveConfig",
-      config: { gatewayUrl: "wss://localhost:8787/extension", deviceToken: "", autoReconnect: true },
+      config: { gatewayUrl: "wss://localhost:8787/extension", deviceToken: "extension-canary-device-token", autoReconnect: true },
     });
     if (!saved?.ok) {
       throw new Error(`Extension saveConfig failed: ${JSON.stringify(saved)}`);

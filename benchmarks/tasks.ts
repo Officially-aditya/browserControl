@@ -50,6 +50,7 @@ function getVisionConfig(mode: BenchmarkMode) {
   return {
     overviewFormat: "webp" as const,
     overviewQuality: 82,
+    overviewLongEdge: 960,
     regionFormat: "png" as const,
     maxRegionInspectionsPerStep: 2,
   };

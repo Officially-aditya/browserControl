@@ -1,8 +1,9 @@
 import http from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
-import { createMcpHandler, Server } from "@modelcontextprotocol/server";
+import { createMcpHandler, Server, type Tool } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
+import { DeviceRegistry, PairingManager } from "./device-auth.js";
 
 interface ExtensionRpcResponse {
   id: string;
@@ -119,17 +120,6 @@ const POINT_PROPERTIES = {
   y: { type: "number", minimum: 0, maximum: 1000 },
 } as const;
 
-type ToolDefinition = {
-  name: string;
-  description: string;
-  inputSchema: {
-    readonly type: "object";
-    readonly properties?: Record<string, unknown>;
-    readonly required?: readonly string[];
-    readonly additionalProperties?: boolean;
-  };
-};
-
 function toolError(error: any) {
   return {
     content: [{
@@ -158,7 +148,70 @@ function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
-function tools(): ToolDefinition[] {
+function safeTokenEqual(provided: string, expected: string): boolean {
+  const providedBytes = Buffer.from(provided, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  return providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes);
+}
+
+function bearerToken(request: http.IncomingMessage): string {
+  const value = request.headers.authorization || "";
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] || "";
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "::";
+}
+
+function writeJson(response: http.ServerResponse, status: number, value: unknown): void {
+  response.writeHead(status, { "Content-Type": "application/json" });
+  response.end(JSON.stringify(value));
+}
+
+async function readJsonBody(request: http.IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
+  const declaredLength = Number(request.headers["content-length"] || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    request.resume();
+    throw Object.assign(new Error("Payload too large"), { code: "PAYLOAD_TOO_LARGE" });
+  }
+
+  return new Promise((resolve, reject) => {
+    let body = "";
+    let size = 0;
+    let settled = false;
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => {
+      if (settled) return;
+      size += Buffer.byteLength(chunk, "utf8");
+      if (size > maxBytes) {
+        settled = true;
+        request.resume();
+        reject(Object.assign(new Error("Payload too large"), { code: "PAYLOAD_TOO_LARGE" }));
+        return;
+      }
+      body += chunk;
+    });
+    request.on("end", () => {
+      if (settled) return;
+      if (!body.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(body);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("JSON body must be an object");
+        resolve(parsed as Record<string, unknown>);
+      } catch (error) {
+        reject(Object.assign(new Error(error instanceof Error ? error.message : "Invalid JSON body"), { code: "INVALID_JSON" }));
+      }
+    });
+    request.on("error", reject);
+  });
+}
+
+function tools(): Tool[] {
   return [
     {
       name: "browser_status",
@@ -350,6 +403,8 @@ export interface RemoteGatewayOptions {
   host?: string;
   extensionToken?: string;
   mcpBearerToken?: string;
+  deviceRegistry?: DeviceRegistry;
+  pairingManager?: PairingManager;
   leaseTtlMs?: number;
   maxMcpBodySize?: number;
 }
@@ -357,16 +412,29 @@ export interface RemoteGatewayOptions {
 export interface RemoteGatewayHandle {
   httpServer: http.Server;
   wss: WebSocketServer;
+  deviceRegistry: DeviceRegistry;
+  pairingManager: PairingManager;
+  mcpBearerToken: string;
 }
 
 export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Promise<RemoteGatewayHandle> {
   const port = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
   const host = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
   const extensionToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
-  const mcpBearerToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
+  const configuredMcpBearerToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
+  if (!configuredMcpBearerToken && !isLoopbackHost(host)) {
+    throw new Error("BROWSERCONTROL_MCP_TOKEN is required when the gateway is not bound to loopback");
+  }
+  const mcpBearerToken = configuredMcpBearerToken || randomBytes(32).toString("base64url");
   const maxMcpBodySize = options.maxMcpBodySize ?? 2 * 1024 * 1024;
   const bridge = new ExtensionBridge();
   const lease = new ControlLease(options.leaseTtlMs ?? 60_000);
+  const deviceRegistry = options.deviceRegistry ?? new DeviceRegistry();
+  const pairingManager = options.pairingManager ?? new PairingManager(deviceRegistry);
+
+  if (!configuredMcpBearerToken) {
+    console.warn(`[browserControl] Generated temporary MCP bearer token: ${mcpBearerToken}`);
+  }
 
   const mcpHandler = createMcpHandler(
     ({ requestInfo }) => createGatewayMcpServer(bridge, lease, requestClientId(requestInfo)),
@@ -377,9 +445,16 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   });
 
   const authorizedMcpRequest = (req: http.IncomingMessage, url: URL) => {
-    if (!mcpBearerToken) return true;
-    const auth = req.headers.authorization || "";
-    return auth === `Bearer ${mcpBearerToken}` || url.searchParams.get("token") === mcpBearerToken;
+    const auth = bearerToken(req);
+    const queryToken = url.searchParams.get("token") || "";
+    return safeTokenEqual(auth, mcpBearerToken) || safeTokenEqual(queryToken, mcpBearerToken);
+  };
+
+  const authorizedAdminRequest = (req: http.IncomingMessage) => safeTokenEqual(bearerToken(req), mcpBearerToken);
+
+  const authorizedExtensionRequest = (token: string) => {
+    if (extensionToken && safeTokenEqual(token, extensionToken)) return true;
+    return Boolean(deviceRegistry.authenticate(token));
   };
 
   const httpServer = http.createServer((req, res) => {
@@ -388,6 +463,63 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, extensionConnected: bridge.connected }));
+      return;
+    }
+
+    if (url.pathname === "/pairing/create" && req.method === "POST") {
+      if (!authorizedAdminRequest(req)) {
+        writeJson(res, 401, { error: "Unauthorized" });
+        req.resume();
+        return;
+      }
+      void readJsonBody(req, maxMcpBodySize)
+        .then((body) => {
+          const name = typeof body.name === "string" ? body.name.trim().slice(0, 120) || undefined : undefined;
+          writeJson(res, 201, pairingManager.create(name));
+        })
+        .catch((error) => writeJson(res, error?.code === "PAYLOAD_TOO_LARGE" ? 413 : 400, { error: error?.message || "Invalid request" }));
+      return;
+    }
+
+    if (url.pathname === "/pairing/claim" && req.method === "POST") {
+      void readJsonBody(req, maxMcpBodySize)
+        .then((body) => {
+          const code = typeof body.code === "string" ? body.code.trim() : "";
+          if (!/^\d{6}$/.test(code)) {
+            writeJson(res, 400, { error: "Pairing code must be six digits" });
+            return;
+          }
+          const credential = pairingManager.claim(code);
+          if (!credential) {
+            writeJson(res, 404, { error: "Pairing code is invalid or expired" });
+            return;
+          }
+          writeJson(res, 200, credential);
+        })
+        .catch((error) => writeJson(res, error?.code === "PAYLOAD_TOO_LARGE" ? 413 : 400, { error: error?.message || "Invalid request" }));
+      return;
+    }
+
+    if (url.pathname === "/devices" && req.method === "GET") {
+      if (!authorizedAdminRequest(req)) {
+        writeJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      writeJson(res, 200, { devices: deviceRegistry.list() });
+      return;
+    }
+
+    if (url.pathname.startsWith("/devices/") && req.method === "DELETE") {
+      if (!authorizedAdminRequest(req)) {
+        writeJson(res, 401, { error: "Unauthorized" });
+        return;
+      }
+      const deviceId = decodeURIComponent(url.pathname.slice("/devices/".length));
+      if (!deviceId || !deviceRegistry.revoke(deviceId)) {
+        writeJson(res, 404, { error: "Device not found" });
+        return;
+      }
+      writeJson(res, 200, { success: true, deviceId });
       return;
     }
 
@@ -424,7 +556,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
       socket.destroy();
       return;
     }
-    if (extensionToken && url.searchParams.get("token") !== extensionToken) {
+    if (!authorizedExtensionRequest(url.searchParams.get("token") || "")) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
@@ -444,7 +576,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   console.log(`[browserControl] MCP endpoint: http://${host}:${actualPort}/mcp`);
   console.log(`[browserControl] Extension endpoint: ws://${host}:${actualPort}/extension`);
 
-  return { httpServer, wss };
+  return { httpServer, wss, deviceRegistry, pairingManager, mcpBearerToken };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

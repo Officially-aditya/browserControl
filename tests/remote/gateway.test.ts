@@ -216,4 +216,53 @@ describe("Remote web-control gateway", () => {
       await second.client.close();
     }
   });
+
+  it("creates one-time device pairings and supports authenticated device revocation", async () => {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/pairing/create`, { method: "POST" });
+    expect(unauthorized.status).toBe(401);
+
+    const created = await fetch(`http://127.0.0.1:${port}/pairing/create`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer mcp-secret",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Chrome laptop" }),
+    });
+    expect(created.status).toBe(201);
+    const pairing = await created.json() as { code: string; expiresAt: number };
+    expect(pairing.code).toMatch(/^\d{6}$/);
+
+    const claimed = await fetch(`http://127.0.0.1:${port}/pairing/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: pairing.code }),
+    });
+    expect(claimed.status).toBe(200);
+    const credential = await claimed.json() as { deviceId: string; deviceToken: string; name?: string };
+    expect(credential.name).toBe("Chrome laptop");
+    expect(gateway.deviceRegistry.authenticate(credential.deviceToken)?.deviceId).toBe(credential.deviceId);
+
+    const reused = await fetch(`http://127.0.0.1:${port}/pairing/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: pairing.code }),
+    });
+    expect(reused.status).toBe(404);
+
+    const listed = await fetch(`http://127.0.0.1:${port}/devices`, {
+      headers: { Authorization: "Bearer mcp-secret" },
+    });
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).devices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ deviceId: credential.deviceId, name: "Chrome laptop" }),
+    ]));
+
+    const revoked = await fetch(`http://127.0.0.1:${port}/devices/${credential.deviceId}`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer mcp-secret" },
+    });
+    expect(revoked.status).toBe(200);
+    expect(gateway.deviceRegistry.authenticate(credential.deviceToken)).toBeNull();
+  });
 });

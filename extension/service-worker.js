@@ -9,7 +9,7 @@ const observations = new Map();
 const MAX_OBSERVATIONS = 32;
 
 const DEFAULT_CONFIG = {
-  gatewayUrl: "ws://127.0.0.1:8787/extension",
+  gatewayUrl: "",
   deviceToken: "",
   autoReconnect: true,
 };

@@ -29,14 +29,14 @@ Repeat
 ## 1. Quick Start
 
 ### Prerequisites
-1. **Node.js** (v18+)
+1. **Node.js** (v20+)
 2. **Google Chrome** (Chrome 144+ recommended for `--auto-connect`):
    - Navigate to `chrome://inspect/#remote-debugging` and ensure remote debugging is enabled, OR
    - Start Chrome with `--remote-debugging-port=9222`
 
 ### Installation & Build
 ```bash
-npm install
+npm ci
 npm run build
 ```
 
@@ -178,11 +178,28 @@ npm run mcp:http
 ```
 
 #### Security Hardening & Configuration:
-- **Mandatory Authentication**: Auto-generates a secure Bearer token on startup, or supply via `MCP_AUTH_TOKEN` environment variable. (Disable only for local testing via `MCP_ALLOW_INSECURE_NO_AUTH=true`).
+- **Mandatory Authentication**: The local `mcp:http` command uses `MCP_AUTH_TOKEN`; the deployed `browser-control-gateway` uses `BROWSERCONTROL_MCP_TOKEN`. Loopback gateway development starts with a temporary token when one is omitted.
 - **DNS Rebinding & Host Validation**: Enforces Host header validation against loopback addresses (`127.0.0.1`, `localhost`, `::1`, `[::1]`) and custom hosts via `MCP_ALLOWED_HOSTS`.
 - **CORS Protection**: Cross-Origin requests are disabled by default. Enable strictly for trusted domains via `MCP_ENABLE_CORS=true` and `MCP_ALLOWED_ORIGINS=https://my-domain.com`.
 - **Request Body Limits**: Enforces payload size limits (default 10 MB, configurable via `MCP_MAX_BODY_SIZE`).
 - **Lazy Reconnect**: Tools automatically connect to Chrome on demand if Chrome is started after the MCP server.
+
+#### Pairing and device revocation
+
+The gateway exposes a small authenticated pairing API. Use the MCP bearer token to create a one-time code, then claim that code from the machine where the extension is configured:
+
+```bash
+curl -X POST https://YOUR_GATEWAY_HOST/pairing/create \
+  -H "Authorization: Bearer $BROWSERCONTROL_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Chrome laptop"}'
+
+curl -X POST https://YOUR_GATEWAY_HOST/pairing/claim \
+  -H "Content-Type: application/json" \
+  -d '{"code":"123456"}'
+```
+
+Enter the returned `deviceToken` in the extension popup. List or revoke issued device credentials with `GET /devices` and `DELETE /devices/:deviceId`, using the MCP bearer token. Pairing credentials are held in memory by the current gateway process; use a persistent credential store before multi-instance deployment.
 
 ---
 

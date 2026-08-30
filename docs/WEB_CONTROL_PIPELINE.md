@@ -75,7 +75,7 @@ All visual coordinates use a model-facing 0-1000 coordinate space.
 ### 1. Start the gateway
 
 ```bash
-npm install
+npm ci
 npm run build
 
 export BROWSERCONTROL_DEVICE_TOKEN="replace-with-a-long-random-token"
@@ -84,13 +84,15 @@ export BROWSERCONTROL_MCP_TOKEN="replace-with-another-long-random-token"
 npm run gateway
 ```
 
-Defaults:
+Local-development defaults:
 
 - MCP: `http://127.0.0.1:8787/mcp`
 - extension WebSocket: `ws://127.0.0.1:8787/extension`
 - health: `http://127.0.0.1:8787/health`
 
 `Dockerfile` is included for deploying the gateway to an HTTPS/WSS-capable host. It honors the platform `PORT` environment variable.
+
+The extension starts with no gateway URL configured. Use the `ws://` endpoint only for a loopback development gateway; deployed gateways must use `wss://`.
 
 ### 2. Load the Chrome extension
 
@@ -106,6 +108,27 @@ Defaults:
 10. Click **Share active tab**.
 
 Chrome displays its debugger/extension indicator while the selected tab is attached.
+
+### Pair a device without sharing a static device secret
+
+Create a one-time pairing code with the MCP bearer token:
+
+```bash
+curl -X POST https://YOUR_GATEWAY_HOST/pairing/create \
+  -H "Authorization: Bearer $BROWSERCONTROL_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Chrome laptop"}'
+```
+
+Claim it on the device being paired:
+
+```bash
+curl -X POST https://YOUR_GATEWAY_HOST/pairing/claim \
+  -H "Content-Type: application/json" \
+  -d '{"code":"123456"}'
+```
+
+Put the returned `deviceToken` in the extension popup and use `wss://YOUR_GATEWAY_HOST/extension`. Issued credentials can be reviewed with authenticated `GET /devices` and revoked with `DELETE /devices/:deviceId`. The current registry is process-local; persistent storage is required for multi-instance deployments.
 
 ### 3. Connect an MCP client
 
@@ -205,7 +228,7 @@ The hackathon/product MVP transport is implemented, but production deployment st
 - real Chrome extension canary testing across Chrome/macOS/Windows/Linux
 - real Claude.ai and ChatGPT web connector canaries
 - MCP-standard OAuth 2.1 authorization instead of static capability tokens
-- persistent/revocable user and device pairing credentials
+- persistent multi-instance storage for the currently revocable device pairing credentials
 - multi-user / multi-device gateway routing instead of the current single connected device
 - gateway rate limits, abuse controls and privacy-safe audit metadata
 - packaged/signed Chrome Web Store distribution
