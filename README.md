@@ -240,24 +240,26 @@ await controller.disconnect();
 ## 7. Test Suites & Verification
 
 ```bash
-# Run unit tests (ActionQueue, coordinates, inputs, protocol schemas)
+# Run unit tests (coordinates, inputs, protocol, ActionQueue, MCP security & reconnect, CLI, mock E2E)
 npm run test:unit
 
-# Run live Chrome integration tests (spawns Chrome, verifies DPR 1/2 calibration, canvas apps, tabs, MCP tunnels)
+# Run live Chrome integration tests (spawns Chrome, verifies DPR 1/2 calibration, canvas apps, tabs, recovery, MCP tunnels)
 npm run test:integration
 
 # Run opt-in smoke test against an already running Chrome instance (chrome --remote-debugging-port=9222)
 npm run test:smoke
 
-# Run full project test suite
+# Run full project test suite across all 21 test files
 npm test
 ```
 
-### Test Coverage Highlights (19 Test Suites, 142+ Tests Passing):
+### Test Coverage Highlights (21 Test Suites, 150+ Tests Passing):
 - **Coordinate & Pixel Calibration**: Sub-2px precision on live Chrome across DPR 1, DPR 2, and page zoom levels.
 - **Observation Guardrails**: Rejection of stale observations (`STALE_OBSERVATION`) on navigations and SPA route changes (`history.pushState`).
-- **ActionQueue Architecture**: FIFO execution, mutual exclusion, AbortSignal propagation, in-flight task tracking, and cancel-and-drain semantics.
+- **ActionQueue Architecture**: FIFO execution, mutual exclusion, AbortSignal propagation, in-flight task tracking, and cancel-and-drain safe reset.
+- **Automatic Controlled Target Recovery**: Automatic switch to open tab or new `about:blank` page upon target destruction or detachment.
 - **Selectorless Canvas E2E**: 100% canvas-rendered visual app automated entirely via vision coordinates and input actions with zero DOM queries.
+- **Unicode & International Script Typing**: Code-point preservation for emojis and multi-byte scripts across DOM inputs and canvas.
 - **MCP Protocol Integrations**: End-to-end tests through official MCP Client using both Stdio and Streamable HTTP transports.
-- **HTTP Security**: 10-part test suite validating Bearer auth, DNS rebinding Host validation, IPv6 normalization, CORS origin whitelisting, and payload limits.
+- **HTTP Security**: 11-part test suite validating Bearer auth, DNS rebinding Host validation, IPv6 normalization, CORS origin whitelisting, and payload limits (`MCP_MAX_BODY_SIZE`).
 - **Browser-Level Ops**: Tabs, windows, and JavaScript dialogs (`alert`, `confirm`, `prompt`, blocking).

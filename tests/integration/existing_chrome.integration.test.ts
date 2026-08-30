@@ -102,7 +102,7 @@ describe("Existing Chrome Opt-In Smoke Test", () => {
     } finally {
       await simulatedChrome.close();
     }
-  });
+  }, 20000);
 
   it.runIf(!isOptedIn)("opt-in instructions when existing-Chrome smoke test is skipped", () => {
     console.info(

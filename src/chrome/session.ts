@@ -99,21 +99,43 @@ export class TabSession extends EventEmitter {
 
   private setupGlobalListeners(): void {
     this.connection.on("close", () => {
+      this.clearSessionListeners();
+      this._sessionId = null;
+      this._targetId = null;
       this.setState("CONNECTION_LOST");
       this.emit("connectionLost");
     });
 
     this.connection.on("Target.targetDestroyed", (params: { targetId: string }) => {
       if (params.targetId === this._targetId) {
+        const closedId = this._targetId;
+        this.clearSessionListeners();
+        this._sessionId = null;
+        this._targetId = null;
         this.setState("TARGET_CLOSED");
-        this.emit("targetClosed", { targetId: params.targetId });
+        this.emit("targetClosed", { targetId: closedId });
+      }
+    });
+
+    this.connection.on("Target.detachedFromTarget", (params: { sessionId: string; targetId?: string }) => {
+      if (params.sessionId === this._sessionId || (params.targetId && params.targetId === this._targetId)) {
+        const closedId = this._targetId;
+        this.clearSessionListeners();
+        this._sessionId = null;
+        this._targetId = null;
+        this.setState("TARGET_CLOSED");
+        this.emit("targetClosed", { targetId: closedId });
       }
     });
 
     this.connection.on("Inspector.detached", (params: { reason: string }, sessionId?: string) => {
       if (sessionId === this._sessionId) {
+        const closedId = this._targetId;
+        this.clearSessionListeners();
+        this._sessionId = null;
+        this._targetId = null;
         this.setState("TARGET_CLOSED");
-        this.emit("detached", { reason: params.reason });
+        this.emit("detached", { reason: params.reason, targetId: closedId });
       }
     });
   }

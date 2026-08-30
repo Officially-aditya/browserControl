@@ -53,6 +53,9 @@ export class TabController {
       const remainingTabs = await this.targetManager.listPageTabs();
       if (remainingTabs.length > 0) {
         await this.switchTab(remainingTabs[0].targetId);
+      } else {
+        const newTargetId = await this.targetManager.createTab("about:blank");
+        await this.switchTab(newTargetId);
       }
     }
     return closed;

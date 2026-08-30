@@ -216,15 +216,17 @@ export class ActionQueue {
   }
 
   /**
-   * Reset the queue to an idle, non-aborted state.
+   * Reset the queue to an idle, non-aborted state, safely cancelling and draining any in-flight task first.
    */
-  public reset(): void {
-    this.abort();
+  public async reset(): Promise<void> {
+    await this.cancelAndDrain();
     this.isAborted = false;
     this.generation++;
     this.queue = [];
     this.currentEntry = null;
     this.isProcessing = false;
+    this.inFlightPromise = null;
+    this.checkDrain();
   }
 }
 
@@ -264,6 +266,74 @@ export class ChromeController {
     this.dragController = new DragController(this.session, this.inputState);
     this.tabController = new TabController(this.connection, this.targetManager, this.session);
     this.navigationController = new NavigationController(this.session);
+
+    // Automatically recover when active controlled target is closed or detached
+    this.session.on("targetClosed", () => {
+      this.autoRecoverTarget().catch(() => {});
+    });
+    this.session.on("detached", () => {
+      this.autoRecoverTarget().catch(() => {});
+    });
+  }
+
+  private recoveryPromise: Promise<string> | null = null;
+
+  /**
+   * Automatically recover and attach to an open tab or a new about:blank page when the controlled target is closed.
+   */
+  public async autoRecoverTarget(): Promise<string> {
+    if (!this.connection.connected) {
+      throw new Error("Cannot recover target: connection to Chrome is closed");
+    }
+
+    if (this.recoveryPromise) {
+      return this.recoveryPromise;
+    }
+
+    this.recoveryPromise = (async () => {
+      try {
+        const previousTargetId = this.session.targetId;
+
+        // 1. Drain pending actions and reset queue for new operations
+        await this.actionQueue.reset();
+        await this.resetInputState().catch(() => {});
+        this.observationStore.clear();
+
+        // 2. Fetch available tabs, excluding the closed target
+        const tabs = await this.targetManager.listPageTabs();
+        const remainingTabs = tabs.filter((t) => t.targetId !== previousTargetId);
+
+        let newTargetId: string;
+        if (remainingTabs.length > 0) {
+          newTargetId = remainingTabs[0].targetId;
+        } else {
+          newTargetId = await this.targetManager.createTab("about:blank");
+        }
+
+        // 3. Attach session to recovered target
+        await this.session.attach(newTargetId);
+        await this.targetManager.activateTab(newTargetId).catch(() => {});
+        return newTargetId;
+      } finally {
+        this.recoveryPromise = null;
+      }
+    })();
+
+    return this.recoveryPromise;
+  }
+
+  /**
+   * Ensure the controller is attached to an active, valid session before performing operations.
+   */
+  public async ensureActiveSession(): Promise<void> {
+    if (!this.connection.connected) return;
+    if (
+      !this.session.sessionId ||
+      this.session.state === "TARGET_CLOSED" ||
+      this.session.state === "DISCONNECTED"
+    ) {
+      await this.autoRecoverTarget();
+    }
   }
 
   public get state(): SessionState {
@@ -327,7 +397,9 @@ export class ChromeController {
    * Capture a viewport screenshot observation
    */
   public async observe(options?: ScreenshotOptions): Promise<Observation> {
+    await this.ensureActiveSession();
     return this.actionQueue.run(async () => {
+      await this.ensureActiveSession();
       return this.screenshotService.capture(options);
     });
   }
@@ -386,12 +458,14 @@ export class ChromeController {
     deltaX = 0,
     deltaY = 0
   ): Promise<ActionResult> {
+    await this.ensureActiveSession();
     const actId = `raw_${++this.actionCounter}_${Date.now()}`;
     const startTime = Date.now();
 
     return this.actionQueue
       .run(async (signal) => {
         try {
+          await this.ensureActiveSession();
           await this.session.executeWithinState(async () => {
             switch (actionType) {
               case "move":
@@ -453,6 +527,7 @@ export class ChromeController {
    * Execute a ComputerAction (mouse, keyboard, screenshot, wait)
    */
   public async executeComputerAction(actionInput: unknown): Promise<ActionResult> {
+    await this.ensureActiveSession();
     const actId = `act_${++this.actionCounter}_${Date.now()}`;
     const startTime = Date.now();
 
@@ -672,6 +747,7 @@ export class ChromeController {
    * Execute a BrowserAction (navigate, tabs, windows, dialogs)
    */
   public async executeBrowserAction(actionInput: unknown): Promise<ActionResult> {
+    await this.ensureActiveSession();
     const actId = `bact_${++this.actionCounter}_${Date.now()}`;
     const startTime = Date.now();
 
@@ -833,6 +909,7 @@ export class ChromeController {
     screenshot?: { imageWidth: number; imageHeight: number; scaleX: number; scaleY: number };
     activeDialog?: DialogInfo | null;
   }> {
+    await this.ensureActiveSession();
     const connected = this.isConnected;
     const wsUrl = this.connection.wsUrl;
     const targetId = this.session.targetId;

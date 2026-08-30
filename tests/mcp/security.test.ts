@@ -286,5 +286,60 @@ describe("MCP HTTP Security Hardening Suite", () => {
       const parsedBody = JSON.parse(res.body);
       expect(parsedBody.error).toContain("Payload Too Large");
     });
+
+    it("should configure body size limit via process.env.MCP_MAX_BODY_SIZE", async () => {
+      const originalEnv = process.env.MCP_MAX_BODY_SIZE;
+      process.env.MCP_MAX_BODY_SIZE = "512"; // 512 bytes limit via env var
+
+      const envServer = await runHttpMcpServer(0, "127.0.0.1", undefined, {
+        authToken: "env-test-token",
+      });
+      const envPort = (envServer.server.address() as any).port;
+
+      try {
+        const payload = JSON.stringify({
+          jsonrpc: "2.0",
+          method: "test",
+          params: { data: "y".repeat(800) }, // 800 bytes exceeds 512 bytes
+          id: 1,
+        });
+
+        const reqPromise = new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const req = http.request(
+            {
+              hostname: "127.0.0.1",
+              port: envPort,
+              path: "/mcp",
+              method: "POST",
+              headers: {
+                Host: `127.0.0.1:${envPort}`,
+                Authorization: "Bearer env-test-token",
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(payload).toString(),
+              },
+            },
+            (res) => {
+              let data = "";
+              res.on("data", (c) => (data += c));
+              res.on("end", () => resolve({ status: res.statusCode || 0, body: data }));
+            }
+          );
+          req.on("error", reject);
+          req.write(payload);
+          req.end();
+        });
+
+        const res = await reqPromise;
+        expect(res.status).toBe(413);
+        expect(res.body).toContain("Payload Too Large");
+      } finally {
+        if (originalEnv !== undefined) {
+          process.env.MCP_MAX_BODY_SIZE = originalEnv;
+        } else {
+          delete process.env.MCP_MAX_BODY_SIZE;
+        }
+        await new Promise<void>((resolve) => envServer.server.close(() => resolve()));
+      }
+    });
   });
 });

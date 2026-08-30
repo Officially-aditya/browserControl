@@ -166,7 +166,7 @@ describe("ActionQueue & Cancellation Architecture", () => {
     await t1.catch(() => {});
 
     // 2. Reset queue for reuse
-    queue.reset();
+    await queue.reset();
 
     // 3. New tasks must execute successfully
     const t2 = queue.run(async () => {
@@ -179,6 +179,41 @@ describe("ActionQueue & Cancellation Architecture", () => {
     const [res2, res3] = await Promise.all([t2, t3]);
     expect(res2).toBe("reused_success_1");
     expect(res3).toBe("reused_success_2");
+  });
+
+  it("should guarantee reset() cancels and drains in-flight task before returning", async () => {
+    const queue = new ActionQueue();
+    let inFlightCleanupCompleted = false;
+
+    // Start a long in-flight task
+    const t1 = queue.run(async (signal) => {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 500);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          setTimeout(() => {
+            inFlightCleanupCompleted = true;
+            resolve("aborted");
+          }, 30);
+        });
+      });
+      throw { errorCode: "ACTION_CANCELLED" };
+    });
+    t1.catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 15));
+
+    // Calling reset() directly while task is mid-flight
+    await queue.reset();
+
+    // in-flight async cleanup MUST be fully settled before reset() unblocks
+    expect(inFlightCleanupCompleted).toBe(true);
+    expect(queue.isRunning).toBe(false);
+    expect(queue.pendingCount).toBe(0);
+
+    // Queue is immediately ready and healthy for new operations
+    const newResult = await queue.run(async () => "post_reset_success");
+    expect(newResult).toBe("post_reset_success");
   });
 
   it("should prevent any post-abort CDP events when cancelled during artificial delayed CDP calls", async () => {

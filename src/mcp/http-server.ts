@@ -110,7 +110,12 @@ export async function runHttpMcpServer(
   ]);
 
   // 4. Request Limit
-  const maxBodySizeBytes = securityOptions.maxBodySizeBytes || DEFAULT_MAX_BODY_SIZE;
+  const envMaxBodySize = process.env.MCP_MAX_BODY_SIZE
+    ? parseInt(process.env.MCP_MAX_BODY_SIZE, 10)
+    : undefined;
+  const maxBodySizeBytes =
+    securityOptions.maxBodySizeBytes ||
+    (envMaxBodySize && !isNaN(envMaxBodySize) ? envMaxBodySize : DEFAULT_MAX_BODY_SIZE);
 
   const mode = (process.env.CHROME_CONNECT_MODE as any) || "auto";
   const controller =

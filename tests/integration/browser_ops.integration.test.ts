@@ -171,11 +171,21 @@ describe("Live Chrome Browser-Level Operations & Window/Dialog Subsystem", () =>
     }
   });
 
+  async function waitForDialog(expectedType: string, timeoutMs = 2000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (controller.activeDialog?.type === expectedType) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
   it("9. alert dialog", async () => {
     controller.session.send("Runtime.evaluate", {
       expression: "setTimeout(() => document.getElementById('trigger-alert').click(), 20)",
     });
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForDialog("alert");
 
     expect(controller.activeDialog?.type).toBe("alert");
     expect(controller.activeDialog?.message).toBe("Alert Test Message");
@@ -194,7 +204,7 @@ describe("Live Chrome Browser-Level Operations & Window/Dialog Subsystem", () =>
     controller.session.send("Runtime.evaluate", {
       expression: "setTimeout(() => document.getElementById('trigger-confirm').click(), 20)",
     });
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForDialog("confirm");
 
     expect(controller.activeDialog?.type).toBe("confirm");
     await controller.executeBrowserAction({ type: "handle_dialog", accept: true });
@@ -209,7 +219,7 @@ describe("Live Chrome Browser-Level Operations & Window/Dialog Subsystem", () =>
     controller.session.send("Runtime.evaluate", {
       expression: "setTimeout(() => document.getElementById('trigger-confirm').click(), 20)",
     });
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForDialog("confirm");
 
     expect(controller.activeDialog?.type).toBe("confirm");
     await controller.executeBrowserAction({ type: "handle_dialog", accept: false });
@@ -226,7 +236,7 @@ describe("Live Chrome Browser-Level Operations & Window/Dialog Subsystem", () =>
     controller.session.send("Runtime.evaluate", {
       expression: "setTimeout(() => document.getElementById('trigger-prompt').click(), 20)",
     });
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForDialog("prompt");
 
     expect(controller.activeDialog?.type).toBe("prompt");
     await controller.executeBrowserAction({
@@ -245,7 +255,7 @@ describe("Live Chrome Browser-Level Operations & Window/Dialog Subsystem", () =>
     controller.session.send("Runtime.evaluate", {
       expression: "setTimeout(() => document.getElementById('trigger-prompt').click(), 20)",
     });
-    await new Promise((r) => setTimeout(r, 150));
+    await waitForDialog("prompt");
 
     expect(controller.activeDialog?.type).toBe("prompt");
     await controller.executeBrowserAction({ type: "handle_dialog", accept: false });
