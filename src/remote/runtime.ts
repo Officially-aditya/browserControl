@@ -1,9 +1,16 @@
+import type http from "node:http";
 import WebSocket, { type WebSocketServer } from "ws";
 import { runRemoteGateway, type RemoteGatewayOptions } from "./gateway.js";
 
 export interface GatewayRuntimeOptions extends RemoteGatewayOptions {
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
+}
+
+export interface GatewayRuntimeHandle {
+  httpServer: http.Server;
+  wss: WebSocketServer;
+  stopHeartbeat: () => void;
 }
 
 export function installExtensionHeartbeat(
@@ -52,11 +59,11 @@ export function installExtensionHeartbeat(
   };
 }
 
-export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}) {
+export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Promise<GatewayRuntimeHandle> {
   const gateway = await runRemoteGateway(options);
   const stopHeartbeat = installExtensionHeartbeat(gateway.wss, options);
   gateway.httpServer.once("close", stopHeartbeat);
-  return { ...gateway, stopHeartbeat };
+  return { httpServer: gateway.httpServer, wss: gateway.wss, stopHeartbeat };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
