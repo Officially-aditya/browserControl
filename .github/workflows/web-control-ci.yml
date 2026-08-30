@@ -39,6 +39,11 @@ jobs:
             -days 1 \
             -subj "/CN=localhost" \
             -addext "subjectAltName=DNS:localhost"
+          SPKI=$(openssl x509 -in /tmp/browsercontrol-test-cert.pem -pubkey -noout \
+            | openssl pkey -pubin -outform der \
+            | openssl dgst -sha256 -binary \
+            | openssl base64 -A)
+          echo "BROWSERCONTROL_TEST_TLS_SPKI=$SPKI" >> "$GITHUB_ENV"
       - name: Real Chrome extension → WSS gateway → MCP canary
         env:
           BROWSERCONTROL_TEST_TLS_KEY: /tmp/browsercontrol-test-key.pem
