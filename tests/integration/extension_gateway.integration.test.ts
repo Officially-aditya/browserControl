@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import WebSocket from "ws";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -212,11 +211,21 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
     const shared = await runtimeMessage(popup.webSocketDebuggerUrl, { type: "shareActiveTab" });
     if (!shared?.ok) throw new Error(`Extension shareActiveTab failed: ${JSON.stringify(shared)}`);
 
-    client = new Client({ name: "extension-canary", version: "1.0.0" });
+    client = new Client(
+      { name: "extension-canary", version: "1.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } }
+    );
     transport = new StreamableHTTPClientTransport(new URL("https://localhost:8787/mcp"), {
-      requestInit: { headers: { Authorization: "Bearer extension-canary-token" } },
+      requestInit: {
+        headers: {
+          Authorization: "Bearer extension-canary-token",
+          "X-BrowserControl-Client-Id": "extension-canary",
+        },
+      },
     });
     await client.connect(transport);
+    expect(client.getProtocolEra()).toBe("modern");
+    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
   }, 35_000);
 
   afterAll(async () => {
