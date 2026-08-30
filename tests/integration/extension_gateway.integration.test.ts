@@ -115,6 +115,7 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
   let gateway: Awaited<ReturnType<typeof runGatewayRuntime>>;
   let client: Client;
   let transport: StreamableHTTPClientTransport;
+  let popupTargetId: string | undefined;
 
   beforeAll(async () => {
     const keyPath = process.env.BROWSERCONTROL_TEST_TLS_KEY;
@@ -166,8 +167,17 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
     const extensionId = new URL(worker.url).host;
     const popupUrl = `chrome-extension://${extensionId}/popup.html`;
 
-    const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", { url: popupUrl, background: true });
-    const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "browserControl popup target");
+    const opened = await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
+      expression: "chrome.action.openPopup()",
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (opened.exceptionDetails) {
+      throw new Error(`chrome.action.openPopup failed: ${JSON.stringify(opened.exceptionDetails)}`);
+    }
+
+    const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "real browserControl action popup");
+    popupTargetId = popup.id;
 
     const probe = await evaluateWebSocketProbe(popup.webSocketDebuggerUrl, "wss://localhost:8787/extension");
     if (!probe.value?.ok) {
@@ -199,7 +209,6 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
 
     const shared = await runtimeMessage(popup.webSocketDebuggerUrl, { type: "shareActiveTab" });
     if (!shared?.ok) throw new Error(`Extension shareActiveTab failed: ${JSON.stringify(shared)}`);
-    await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
     transport = new StreamableHTTPClientTransport(new URL("https://localhost:8787/mcp"), {
@@ -211,6 +220,9 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
   afterAll(async () => {
     try { await client?.callTool({ name: "browser_release_control", arguments: {} }); } catch {}
     try { await client?.close(); } catch {}
+    if (popupTargetId) {
+      try { await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupTargetId }); } catch {}
+    }
     try { await controller?.disconnect(); } catch {}
     try { await chrome?.close(); } catch {}
     try { await fixture?.close(); } catch {}
