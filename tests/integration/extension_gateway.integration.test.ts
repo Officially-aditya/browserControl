@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import WebSocket from "ws";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { launchRealChrome, LaunchedChrome } from "../helpers/chrome-launcher.js";
 import { startTestServer, TestServer } from "../fixtures/test-server.js";
@@ -43,27 +44,7 @@ async function waitForTarget(port: number, predicate: (target: any) => boolean, 
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-async function extensionDiagnostics(port: number): Promise<any> {
-  try {
-    const worker = await waitForTarget(
-      port,
-      (target) =>
-        (target.type === "service_worker" || target.type === "background_page") &&
-        typeof target.url === "string" && target.url.startsWith("chrome-extension://"),
-      "extension worker diagnostics"
-    );
-    const evaluated = await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `chrome.storage.local.get(null)`,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    return { storage: evaluated.result?.value, exceptionDetails: evaluated.exceptionDetails };
-  } catch (error: any) {
-    return { diagnosticError: error?.message || String(error) };
-  }
-}
-
-describe("Real Chrome extension -> gateway -> MCP canary", () => {
+describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
   let chrome: LaunchedChrome;
   let fixture: TestServer;
   let controller: ChromeController;
@@ -72,6 +53,14 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
   let transport: StreamableHTTPClientTransport;
 
   beforeAll(async () => {
+    const keyPath = process.env.BROWSERCONTROL_TEST_TLS_KEY;
+    const certPath = process.env.BROWSERCONTROL_TEST_TLS_CERT;
+    if (!keyPath || !certPath) throw new Error("TLS canary certificate paths are required");
+    const [tlsKey, tlsCert] = await Promise.all([
+      fs.readFile(keyPath, "utf8"),
+      fs.readFile(certPath, "utf8"),
+    ]);
+
     gateway = await runGatewayRuntime({
       host: "localhost",
       port: 8787,
@@ -79,6 +68,8 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       mcpBearerToken: "extension-canary-token",
       heartbeatIntervalMs: 2_000,
       heartbeatTimeoutMs: 8_000,
+      tlsKey,
+      tlsCert,
     });
 
     fixture = await startTestServer(0);
@@ -88,6 +79,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       headless: false,
       disableBackgroundNetworking: false,
       extraArgs: [
+        "--ignore-certificate-errors",
         `--disable-extensions-except=${extensionDir}`,
         `--load-extension=${extensionDir}`,
       ],
@@ -113,7 +105,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
 
     const probe = await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `new Promise((resolve) => {
-        const probeSocket = new WebSocket("ws://localhost:8787/extension");
+        const probeSocket = new WebSocket("wss://localhost:8787/extension");
         const timer = setTimeout(() => resolve({ok:false, timeout:true, readyState:probeSocket.readyState}), 3000);
         probeSocket.onopen = () => { clearTimeout(timer); probeSocket.close(1000, "probe"); resolve({ok:true}); };
         probeSocket.onerror = () => { clearTimeout(timer); resolve({ok:false, error:true, readyState:probeSocket.readyState}); };
@@ -122,11 +114,11 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       returnByValue: true,
     });
     if (!probe.result?.value?.ok) {
-      throw new Error(`Extension-page WebSocket probe failed: ${JSON.stringify(probe)}`);
+      throw new Error(`Extension-page secure WebSocket probe failed: ${JSON.stringify(probe)}`);
     }
 
     await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"ws://localhost:8787/extension",deviceToken:"",autoReconnect:true}})`,
+      expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"wss://localhost:8787/extension",deviceToken:"",autoReconnect:true}})`,
       awaitPromise: true,
       returnByValue: true,
     });
@@ -134,17 +126,14 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     const connectDeadline = Date.now() + 8000;
     let extensionConnected = false;
     while (Date.now() < connectDeadline) {
-      const health = await fetch("http://localhost:8787/health").then((r) => r.json()) as any;
+      const health = await fetch("https://localhost:8787/health").then((r) => r.json()) as any;
       if (health.extensionConnected) {
         extensionConnected = true;
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (!extensionConnected) {
-      const diagnostics = await extensionDiagnostics(chrome.port);
-      throw new Error(`Extension never connected after Save & connect: ${JSON.stringify(diagnostics)}`);
-    }
+    expect(extensionConnected).toBe(true);
 
     await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
@@ -154,7 +143,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
-    transport = new StreamableHTTPClientTransport(new URL("http://localhost:8787/mcp"), {
+    transport = new StreamableHTTPClientTransport(new URL("https://localhost:8787/mcp"), {
       requestInit: { headers: { Authorization: "Bearer extension-canary-token" } },
     });
     await client.connect(transport);
