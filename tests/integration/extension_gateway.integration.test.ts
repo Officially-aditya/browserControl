@@ -26,11 +26,7 @@ async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise
     });
   });
   ws.send(JSON.stringify({ id, method, params }));
-  try {
-    return await response;
-  } finally {
-    ws.close();
-  }
+  try { return await response; } finally { ws.close(); }
 }
 
 async function listTargets(port: number): Promise<any[]> {
@@ -120,16 +116,16 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
 
     const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", { url: popupUrl, background: true });
     const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "browserControl popup target");
+
     await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
+      expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"ws://127.0.0.1:8787/extension",deviceToken:"",autoReconnect:true}})`,
       awaitPromise: true,
       returnByValue: true,
     });
-    await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
-    const deadline = Date.now() + 8000;
+    const connectDeadline = Date.now() + 8000;
     let extensionConnected = false;
-    while (Date.now() < deadline) {
+    while (Date.now() < connectDeadline) {
       const health = await fetch("http://127.0.0.1:8787/health").then((r) => r.json()) as any;
       if (health.extensionConnected) {
         extensionConnected = true;
@@ -139,8 +135,15 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     }
     if (!extensionConnected) {
       const diagnostics = await extensionDiagnostics(chrome.port);
-      throw new Error(`Extension never connected to gateway: ${JSON.stringify(diagnostics)}`);
+      throw new Error(`Extension never connected after Save & connect: ${JSON.stringify(diagnostics)}`);
     }
+
+    await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
+      expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
     transport = new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8787/mcp"), {
