@@ -9,7 +9,8 @@
     "chrome-computer-use": "./dist/cli/index.js",
     "chrome-computer-use-mcp": "./dist/mcp/server.js",
     "chrome-computer-use-http": "./dist/mcp/http-server.js",
-    "browser-control-gateway": "./dist/remote/gateway.js"
+    "browser-control-gateway": "./dist/remote/gateway.js",
+    "browser-control-setup": "./dist/remote/setup.js"
   },
   "scripts": {
     "build": "tsc",
@@ -18,6 +19,7 @@
     "doctor": "tsx src/cli/index.ts doctor",
     "mcp": "tsx src/mcp/server.ts",
     "mcp:http": "tsx src/mcp/http-server.ts",
+    "gateway:setup": "tsx src/remote/setup.ts",
     "gateway": "tsx src/remote/gateway.ts",
     "test:web": "vitest run tests/remote",
     "test:unit": "vitest run tests/coordinates tests/mouse tests/keyboard tests/protocol tests/fixtures tests/controller tests/mcp tests/cli tests/e2e tests/vision tests/agent",
