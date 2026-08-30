@@ -180,4 +180,65 @@ describe("ActionQueue & Cancellation Architecture", () => {
     expect(res2).toBe("reused_success_1");
     expect(res3).toBe("reused_success_2");
   });
+
+  it("should prevent any post-abort CDP events when cancelled during artificial delayed CDP calls", async () => {
+    const queue = new ActionQueue();
+    const dispatchedEvents: Array<{ actionId: string; step: number; timestamp: number }> = [];
+
+    // Simulated multi-step CDP executor with 40ms artificial delay per CDP call
+    const runMultiStepAction = (actionId: string, totalSteps: number) => {
+      return queue.run(async (signal) => {
+        for (let step = 1; step <= totalSteps; step++) {
+          if (signal.aborted) {
+            throw { errorCode: "ACTION_CANCELLED", message: `Action ${actionId} aborted before step ${step}` };
+          }
+
+          // Artificial delayed CDP call
+          await new Promise((r) => setTimeout(r, 40));
+
+          if (signal.aborted) {
+            throw { errorCode: "ACTION_CANCELLED", message: `Action ${actionId} aborted after step ${step}` };
+          }
+
+          dispatchedEvents.push({ actionId, step, timestamp: Date.now() });
+        }
+        return `completed_${actionId}`;
+      });
+    };
+
+    // Queue Action 1 (10 steps) and Action 2 (5 steps)
+    const action1Promise = runMultiStepAction("action1", 10);
+    const action2Promise = runMultiStepAction("action2", 5);
+
+    // Let Action 1 run its first step (~50ms)
+    await new Promise((r) => setTimeout(r, 55));
+
+    // Abort the queue while Action 1 is in progress
+    const abortTimestamp = Date.now();
+    queue.abort();
+
+    // Verify rejection results
+    const [res1, res2] = await Promise.all([
+      action1Promise.catch((err) => err),
+      action2Promise.catch((err) => err),
+    ]);
+
+    expect(res1.errorCode).toBe("ACTION_CANCELLED");
+    expect(res2.errorCode).toBe("ACTION_CANCELLED");
+
+    // Wait extra time to ensure no dangling background steps run
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Assert that NO events from Action 2 were ever dispatched
+    const action2Events = dispatchedEvents.filter((e) => e.actionId === "action2");
+    expect(action2Events.length).toBe(0);
+
+    // Assert that NO events from Action 1 were dispatched AFTER the abort timestamp
+    const postAbortEvents = dispatchedEvents.filter((e) => e.timestamp > abortTimestamp);
+    expect(postAbortEvents.length).toBe(0);
+
+    // Only the pre-abort step(s) should exist
+    expect(dispatchedEvents.length).toBeLessThanOrEqual(2);
+  });
 });
+

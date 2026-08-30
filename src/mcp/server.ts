@@ -163,7 +163,7 @@ export async function createMcpServer(controller: ChromeController): Promise<Ser
           {
             type: "image",
             data: obs.image,
-            mimeType: "image/png",
+            mimeType: (args as any)?.format === "jpeg" ? "image/jpeg" : (args as any)?.format === "webp" ? "image/webp" : "image/png",
           },
         ],
       };

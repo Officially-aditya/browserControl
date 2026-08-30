@@ -167,4 +167,62 @@ describe("Mouse & Drag Controllers with InputStateManager", () => {
     expect(keyUpEvents.length).toBe(1);
     expect(keyUpEvents[0].params.key).toBe("Shift");
   });
+
+  it("should cleanly release simultaneous held keys and held mouse buttons on reset_input", async () => {
+    const sentMessages: Array<{ method: string; params: any }> = [];
+    const mockSession = {
+      send: vi.fn().mockImplementation((method: string, params: any) => {
+        sentMessages.push({ method, params });
+        return Promise.resolve({});
+      }),
+    } as any;
+
+    const inputState = new InputStateManager();
+    const mouse = new MouseController(mockSession, inputState);
+    const keyboard = new KeyboardController(mockSession, inputState);
+
+    // Hold multiple keys and multiple buttons simultaneously
+    inputState.setKeyDown("Shift");
+    inputState.setKeyDown("Control");
+    inputState.setKeyDown("Meta");
+    inputState.setKeyDown("a");
+    inputState.setMouseDown("left");
+    inputState.setMouseDown("right");
+    inputState.setMouseDown("middle");
+
+    expect(inputState.pressedKeys.size).toBe(4);
+    expect(inputState.modifierBitmask).toBe(14); // Shift(8) + Control(2) + Meta(4)
+    expect(inputState.pressedButtons.size).toBe(3);
+    expect(inputState.buttonsBitmask).toBe(7); // left(1) + right(2) + middle(4)
+
+    // Execute full reset_input sequence
+    await mouse.reset();
+    await keyboard.reset();
+
+    // Verify all states completely cleared
+    expect(inputState.pressedKeys.size).toBe(0);
+    expect(inputState.modifierBitmask).toBe(0);
+    expect(inputState.pressedButtons.size).toBe(0);
+    expect(inputState.buttonsBitmask).toBe(0);
+
+    // Verify CDP messages
+    const cancelDragging = sentMessages.filter((m) => m.method === "Input.cancelDragging");
+    expect(cancelDragging.length).toBe(1);
+
+    const releasedButtons = sentMessages
+      .filter((m) => m.method === "Input.dispatchMouseEvent" && m.params?.type === "mouseReleased")
+      .map((m) => m.params.button);
+    expect(releasedButtons).toContain("left");
+    expect(releasedButtons).toContain("right");
+    expect(releasedButtons).toContain("middle");
+
+    const releasedKeys = sentMessages
+      .filter((m) => m.method === "Input.dispatchKeyEvent" && m.params?.type === "keyUp")
+      .map((m) => m.params.key);
+    expect(releasedKeys).toContain("Shift");
+    expect(releasedKeys).toContain("Control");
+    expect(releasedKeys).toContain("Meta");
+    expect(releasedKeys).toContain("a");
+  });
 });
+

@@ -59,6 +59,24 @@ export class TabSession extends EventEmitter {
     return this._activeDialog;
   }
 
+  /**
+   * Visual Epoch token used to detect stale screenshot observations.
+   *
+   * Invalidation Policy (Best-Effort Semantic Protection):
+   * - Incremented on macro-structural state changes:
+   *   1. Top-level frame navigation (`Page.frameNavigated`)
+   *   2. Page load completions (`Page.loadEventFired`)
+   *   3. Asynchronous intra-document SPA navigations (`Page.navigatedWithinDocument` / `pushState`)
+   *   4. JavaScript dialog opening/closing (`Page.javascriptDialogOpening`/`Closed`)
+   *   5. Tab switching and re-attachment (`session.attach`)
+   *   6. Visual state-mutating actions (`click`, `double_click`, `drag`, `type`, `scroll`, `keypress`)
+   *
+   * - Best-Effort Note on Background In-Page Micro-DOM Mutations:
+   *   Background DOM updates (e.g. CSS animations, timer intervals, reactive state re-renders)
+   *   intentionally do NOT thrash the visualEpoch. Invalidation on every micro-DOM node insertion
+   *   would produce severe false-positive rejections on modern reactive web apps (e.g. YouTube, Docs).
+   *   The vision agent's perception-action loop remains the ultimate authority for continuous visual reasoning.
+   */
   public get visualEpoch(): number {
     return this._visualEpoch;
   }

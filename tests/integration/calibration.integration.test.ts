@@ -214,4 +214,42 @@ describe("Live Chrome Coordinate Calibration & Real Pixel Precision", () => {
       await chrome.close();
     }
   });
+
+  it("should invalidate observations upon asynchronous in-page SPA navigation (pushState / navigatedWithinDocument)", async () => {
+    const chrome = await launchRealChrome({ windowSize: "1280,800" });
+    const controller = new ChromeController({ mode: "ws-endpoint", wsEndpoint: chrome.wsUrl });
+    await controller.connect();
+
+    try {
+      await controller.navigationController.navigate(`${server.url}/interactive.html`);
+      const obsBeforeAsync = await controller.observe();
+      const initialEpoch = controller.session.visualEpoch;
+
+      // Trigger asynchronous in-page SPA navigation
+      await controller.session.send("Runtime.evaluate", {
+        expression: "setTimeout(() => { history.pushState({ page: 2 }, 'Page 2', '/async-route-2'); }, 40);",
+      });
+
+      // Wait for async navigation event to execute in browser and reach CDP
+      await new Promise((r) => setTimeout(r, 150));
+
+      // VisualEpoch must have bumped
+      expect(controller.session.visualEpoch).toBeGreaterThan(initialEpoch);
+
+      // Computer action planned against pre-navigation observation must fail with STALE_OBSERVATION
+      const actionRes = await controller.executeComputerAction({
+        type: "click",
+        observationId: obsBeforeAsync.observationId,
+        x: 100,
+        y: 100,
+      });
+
+      expect(actionRes.success).toBe(false);
+      expect(actionRes.errorCode).toBe("STALE_OBSERVATION");
+    } finally {
+      await controller.disconnect();
+      await chrome.close();
+    }
+  });
 });
+
