@@ -8,7 +8,8 @@
   "bin": {
     "chrome-computer-use": "./dist/cli/index.js",
     "chrome-computer-use-mcp": "./dist/mcp/server.js",
-    "chrome-computer-use-http": "./dist/mcp/http-server.js"
+    "chrome-computer-use-http": "./dist/mcp/http-server.js",
+    "browser-control-gateway": "./dist/remote/gateway.js"
   },
   "scripts": {
     "build": "tsc",
@@ -17,6 +18,7 @@
     "doctor": "tsx src/cli/index.ts doctor",
     "mcp": "tsx src/mcp/server.ts",
     "mcp:http": "tsx src/mcp/http-server.ts",
+    "gateway": "tsx src/remote/gateway.ts",
     "test:unit": "vitest run tests/coordinates tests/mouse tests/keyboard tests/protocol tests/fixtures tests/controller tests/mcp tests/cli tests/e2e tests/vision tests/agent",
     "test:integration": "vitest run tests/integration",
     "test:smoke": "TEST_EXISTING_CHROME=1 vitest run tests/integration/existing_chrome.integration.test.ts",
