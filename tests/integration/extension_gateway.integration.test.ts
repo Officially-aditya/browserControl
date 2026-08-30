@@ -160,8 +160,10 @@ describe("Real Chrome extension -> WSS gateway -> MCP canary", () => {
     const worker = await waitForTarget(
       chrome.port,
       (target) =>
-        (target.type === "service_worker" || target.type === "background_page") &&
-        typeof target.url === "string" && target.url.startsWith("chrome-extension://"),
+        target.type === "service_worker" &&
+        typeof target.url === "string" &&
+        target.url.startsWith("chrome-extension://") &&
+        target.url.endsWith("/service-worker.js"),
       "browserControl extension service worker"
     );
     const extensionId = new URL(worker.url).host;
