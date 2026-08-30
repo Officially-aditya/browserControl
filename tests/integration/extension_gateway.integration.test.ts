@@ -6,7 +6,7 @@ import path from "node:path";
 import { launchRealChrome, LaunchedChrome } from "../helpers/chrome-launcher.js";
 import { startTestServer, TestServer } from "../fixtures/test-server.js";
 import { ChromeController } from "../../src/controller.js";
-import { runRemoteGateway } from "../../src/remote/gateway.js";
+import { runGatewayRuntime } from "../../src/remote/runtime.js";
 
 async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise<any> {
   const ws = new WebSocket(wsUrl);
@@ -51,16 +51,18 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
   let chrome: LaunchedChrome;
   let fixture: TestServer;
   let controller: ChromeController;
-  let gateway: Awaited<ReturnType<typeof runRemoteGateway>>;
+  let gateway: Awaited<ReturnType<typeof runGatewayRuntime>>;
   let client: Client;
   let transport: StreamableHTTPClientTransport;
 
   beforeAll(async () => {
-    gateway = await runRemoteGateway({
+    gateway = await runGatewayRuntime({
       host: "127.0.0.1",
       port: 8787,
       extensionToken: "",
       mcpBearerToken: "extension-canary-token",
+      heartbeatIntervalMs: 2_000,
+      heartbeatTimeoutMs: 8_000,
     });
 
     fixture = await startTestServer(0);
@@ -106,7 +108,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     });
     await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 8000;
     let extensionConnected = false;
     while (Date.now() < deadline) {
       const health = await fetch("http://127.0.0.1:8787/health").then((r) => r.json()) as any;
@@ -123,7 +125,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       requestInit: { headers: { Authorization: "Bearer extension-canary-token" } },
     });
     await client.connect(transport);
-  }, 30_000);
+  }, 35_000);
 
   afterAll(async () => {
     try { await client?.callTool({ name: "browser_release_control", arguments: {} }); } catch {}
