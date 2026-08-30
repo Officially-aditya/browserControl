@@ -26,15 +26,17 @@ export async function launchRealChrome(options: {
   windowSize?: string;
   deviceScaleFactor?: number;
   extraArgs?: string[];
+  headless?: boolean;
 } = {}): Promise<LaunchedChrome> {
   const chromePath = findChromePath();
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "chrome-cu-test-"));
   const windowSize = options.windowSize || "1280,800";
+  const headless = options.headless ?? true;
 
   const args = [
     "--remote-debugging-port=0",
     `--user-data-dir=${tempDir}`,
-    "--headless=new",
+    ...(headless ? ["--headless=new"] : []),
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-background-networking",
@@ -52,7 +54,6 @@ export async function launchRealChrome(options: {
 
   const activePortFile = path.join(tempDir, "DevToolsActivePort");
 
-  // Wait for DevToolsActivePort to be written
   const startTime = Date.now();
   let port = 0;
   let wsPath = "";
@@ -64,9 +65,7 @@ export async function launchRealChrome(options: {
       if (lines.length >= 2) {
         port = parseInt(lines[0], 10);
         wsPath = lines[1];
-        if (!isNaN(port) && wsPath) {
-          break;
-        }
+        if (!isNaN(port) && wsPath) break;
       }
     } catch {
       // File not yet written
@@ -93,11 +92,5 @@ export async function launchRealChrome(options: {
     } catch {}
   };
 
-  return {
-    process: proc,
-    port,
-    wsUrl,
-    tempDir,
-    close,
-  };
+  return { process: proc, port, wsUrl, tempDir, close };
 }
