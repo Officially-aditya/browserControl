@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "browserControl",
+  "version": "0.1.0",
+  "description": "Securely let connected AI clients control the Chrome tab you explicitly share.",
+  "permissions": ["debugger", "tabs", "storage", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "browserControl",
+    "default_popup": "popup.html"
+  }
+}
