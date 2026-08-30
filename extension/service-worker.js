@@ -357,37 +357,72 @@ async function handleRpc(request) {
   }
 }
 
+function clearReconnectTimer() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
 async function connectGateway() {
-  clearTimeout(reconnectTimer);
+  clearReconnectTimer();
   if (manualDisconnect) return;
   const config = await getConfig();
   if (!config.gatewayUrl) return;
   if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) return;
+
   const url = new URL(config.gatewayUrl);
   if (config.deviceToken) url.searchParams.set("token", config.deviceToken);
-  socket = new WebSocket(url.toString());
-  socket.onopen = async () => {
+  const currentSocket = new WebSocket(url.toString());
+  socket = currentSocket;
+
+  currentSocket.onopen = async () => {
+    if (socket !== currentSocket) return;
     await setStatus(paused ? "paused" : "connected", { gatewayUrl: config.gatewayUrl });
-    socket.send(JSON.stringify({ type: "hello", version: 1, userAgent: navigator.userAgent }));
+    if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+      currentSocket.send(JSON.stringify({ type: "hello", version: 1, userAgent: navigator.userAgent }));
+    }
   };
-  socket.onmessage = async (event) => {
+
+  currentSocket.onmessage = async (event) => {
+    if (socket !== currentSocket) return;
     let request;
     try { request = JSON.parse(event.data); } catch { return; }
     if (!request?.id || !request?.method) return;
     try {
       const result = await handleRpc(request);
-      socket.send(JSON.stringify({ id: request.id, ok: true, result }));
+      if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+        currentSocket.send(JSON.stringify({ id: request.id, ok: true, result }));
+      }
     } catch (error) {
-      socket.send(JSON.stringify({ id: request.id, ok: false, error: { code: error?.code || "RPC_ERROR", message: error?.message || String(error) } }));
+      if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+        currentSocket.send(JSON.stringify({ id: request.id, ok: false, error: { code: error?.code || "RPC_ERROR", message: error?.message || String(error) } }));
+      }
     }
   };
-  socket.onclose = async () => {
-    await setStatus("disconnected");
+
+  currentSocket.onclose = async () => {
+    if (socket !== currentSocket) return;
     socket = null;
-    const config = await getConfig();
-    if (!manualDisconnect && config.autoReconnect) reconnectTimer = setTimeout(connectGateway, 2000);
+    await setStatus("disconnected");
+    const latestConfig = await getConfig();
+    if (!manualDisconnect && latestConfig.autoReconnect) {
+      clearReconnectTimer();
+      reconnectTimer = setTimeout(connectGateway, 2000);
+    }
   };
-  socket.onerror = () => setStatus("error");
+
+  currentSocket.onerror = () => {
+    if (socket === currentSocket) void setStatus("error");
+  };
+}
+
+async function replaceGatewayConnection() {
+  clearReconnectTimer();
+  const previousSocket = socket;
+  socket = null;
+  if (previousSocket && previousSocket.readyState !== WebSocket.CLOSED) {
+    try { previousSocket.close(1000, "Gateway configuration changed"); } catch {}
+  }
+  await connectGateway();
 }
 
 chrome.debugger.onEvent.addListener((source, method) => {
@@ -412,7 +447,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "saveConfig") {
       manualDisconnect = false;
       await chrome.storage.local.set(message.config || {});
-      if (socket) socket.close(); else connectGateway();
+      await replaceGatewayConnection();
       return { ok: true };
     }
     if (message.type === "shareActiveTab") {
@@ -428,11 +463,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message.type === "disconnect") {
       manualDisconnect = true;
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+      clearReconnectTimer();
       const closingSocket = socket;
       socket = null;
-      if (closingSocket) closingSocket.close(1000, "Disconnected by user");
+      if (closingSocket) {
+        try { closingSocket.close(1000, "Disconnected by user"); } catch {}
+      }
       await detach();
       await setStatus("disconnected");
       return { ok: true };
