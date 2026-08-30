@@ -47,6 +47,32 @@ async function waitForTarget(port: number, predicate: (target: any) => boolean, 
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+async function extensionDiagnostics(port: number): Promise<any> {
+  try {
+    const worker = await waitForTarget(
+      port,
+      (target) =>
+        (target.type === "service_worker" || target.type === "background_page") &&
+        typeof target.url === "string" && target.url.startsWith("chrome-extension://"),
+      "extension worker diagnostics"
+    );
+    const evaluated = await sendCdp(worker.webSocketDebuggerUrl, "Runtime.evaluate", {
+      expression: `(async () => ({
+        webSocketType: typeof WebSocket,
+        socketReadyState: typeof socket !== "undefined" && socket ? socket.readyState : null,
+        manualDisconnect: typeof manualDisconnect !== "undefined" ? manualDisconnect : null,
+        config: typeof getConfig === "function" ? await getConfig() : null,
+        stored: await chrome.storage.local.get(null)
+      }))()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    return evaluated.result?.value ?? evaluated;
+  } catch (error: any) {
+    return { diagnosticError: error?.message || String(error) };
+  }
+}
+
 describe("Real Chrome extension -> gateway -> MCP canary", () => {
   let chrome: LaunchedChrome;
   let fixture: TestServer;
@@ -86,22 +112,14 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       chrome.port,
       (target) =>
         (target.type === "service_worker" || target.type === "background_page") &&
-        typeof target.url === "string" &&
-        target.url.startsWith("chrome-extension://"),
+        typeof target.url === "string" && target.url.startsWith("chrome-extension://"),
       "browserControl extension service worker"
     );
     const extensionId = new URL(worker.url).host;
     const popupUrl = `chrome-extension://${extensionId}/popup.html`;
 
-    const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", {
-      url: popupUrl,
-      background: true,
-    });
-    const popup = await waitForTarget(
-      chrome.port,
-      (target) => target.url === popupUrl,
-      "browserControl popup target"
-    );
+    const popupCreated = await sendCdp(chrome.wsUrl, "Target.createTarget", { url: popupUrl, background: true });
+    const popup = await waitForTarget(chrome.port, (target) => target.url === popupUrl, "browserControl popup target");
     await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `chrome.runtime.sendMessage({type:"shareActiveTab"})`,
       awaitPromise: true,
@@ -119,7 +137,10 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    expect(extensionConnected).toBe(true);
+    if (!extensionConnected) {
+      const diagnostics = await extensionDiagnostics(chrome.port);
+      throw new Error(`Extension never connected to gateway: ${JSON.stringify(diagnostics)}`);
+    }
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
     transport = new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8787/mcp"), {
@@ -135,9 +156,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     try { await chrome?.close(); } catch {}
     try { await fixture?.close(); } catch {}
     try { gateway?.wss.close(); } catch {}
-    if (gateway?.httpServer) {
-      await new Promise<void>((resolve) => gateway.httpServer.close(() => resolve()));
-    }
+    if (gateway?.httpServer) await new Promise<void>((resolve) => gateway.httpServer.close(() => resolve()));
   });
 
   it("captures the shared tab through chrome.debugger and executes an observation-bound click", async () => {
@@ -162,12 +181,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
 
     const clicked = await client.callTool({
       name: "browser_click",
-      arguments: {
-        observationId: metadata.observationId,
-        x: 68,
-        y: 151,
-        button: "left",
-      },
+      arguments: { observationId: metadata.observationId, x: 68, y: 151, button: "left" },
     });
     expect(clicked.isError).toBeFalsy();
 
