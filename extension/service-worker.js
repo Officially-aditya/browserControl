@@ -3,6 +3,7 @@ let socket = null;
 let attachedTabId = null;
 let visualEpoch = 0;
 let paused = false;
+let manualDisconnect = false;
 let reconnectTimer = null;
 const observations = new Map();
 const MAX_OBSERVATIONS = 32;
@@ -18,7 +19,7 @@ async function getConfig() {
 }
 
 async function setStatus(status, extra = {}) {
-  await chrome.storage.local.set({ status, attachedTabId, visualEpoch, paused, ...extra });
+  await chrome.storage.local.set({ status, attachedTabId, visualEpoch, paused, manualDisconnect, ...extra });
   const map = {
     connected: ["ON", "#137333"],
     paused: ["II", "#b06000"],
@@ -64,9 +65,9 @@ async function detach() {
 
 async function ensureAttached() {
   if (attachedTabId != null) return attachedTabId;
-  const tab = await activeTab();
-  await attach(tab.id);
-  return tab.id;
+  const error = new Error("No Chrome tab is shared. Open the browserControl extension and click Share active tab.");
+  error.code = "NO_TAB_SHARED";
+  throw error;
 }
 
 async function send(method, params = {}) {
@@ -126,9 +127,11 @@ function normalizedPointToSource(x, y, record) {
   if (![x, y].every(Number.isFinite)) throw new Error("x and y must be finite numbers");
   if (x < 0 || x > 1000 || y < 0 || y > 1000) throw new Error("normalized coordinates must be between 0 and 1000");
   const r = record.sourceRegion;
+  const maxX = Math.max(r.x, r.x + r.width - 0.001);
+  const maxY = Math.max(r.y, r.y + r.height - 0.001);
   return {
-    x: Math.max(0, r.x + (x / 1000) * r.width),
-    y: Math.max(0, r.y + (y / 1000) * r.height),
+    x: Math.min(maxX, Math.max(r.x, r.x + (x / 1000) * r.width)),
+    y: Math.min(maxY, Math.max(r.y, r.y + (y / 1000) * r.height)),
   };
 }
 
@@ -240,12 +243,14 @@ async function scroll(params) {
 }
 
 async function typeText(params) {
+  await ensureAttached();
   await send("Input.insertText", { text: String(params.text ?? "") });
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function keypress(params) {
+  await ensureAttached();
   const keys = Array.isArray(params.keys) ? params.keys : [];
   if (!keys.length) throw new Error("keys is required");
   const modifiersMap = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
@@ -260,6 +265,7 @@ async function keypress(params) {
 }
 
 async function navigate(params) {
+  await ensureAttached();
   if (!params.url) throw new Error("url is required");
   await send("Page.navigate", { url: params.url });
   invalidateVisualState();
@@ -287,6 +293,7 @@ async function listTabs() {
 }
 
 async function switchTab(params) {
+  await ensureAttached();
   const tabId = Number(params.targetId);
   if (!Number.isInteger(tabId)) throw new Error("targetId must be a Chrome tab id");
   await chrome.tabs.update(tabId, { active: true });
@@ -296,6 +303,7 @@ async function switchTab(params) {
 }
 
 async function newTab(params = {}) {
+  await ensureAttached();
   const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
   if (!tab.id) throw new Error("Failed to create tab");
   await attach(tab.id);
@@ -303,6 +311,7 @@ async function newTab(params = {}) {
 }
 
 async function closeTab(params = {}) {
+  await ensureAttached();
   const tabId = params.targetId ? Number(params.targetId) : attachedTabId;
   if (!Number.isInteger(tabId)) throw new Error("No target tab to close");
   await chrome.tabs.remove(tabId);
@@ -314,17 +323,18 @@ async function closeTab(params = {}) {
 }
 
 async function handleDialog(params = {}) {
+  await ensureAttached();
   await send("Page.handleJavaScriptDialog", { accept: !!params.accept, ...(params.promptText != null ? { promptText: String(params.promptText) } : {}) });
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function handleRpc(request) {
-  if (paused && !["status", "resume", "disconnect"].includes(request.method)) {
-    throw Object.assign(new Error("CONTROL_PAUSED"), { code: "CONTROL_PAUSED" });
+  if (paused && request.method !== "status") {
+    throw Object.assign(new Error("CONTROL_PAUSED_BY_USER"), { code: "CONTROL_PAUSED" });
   }
   switch (request.method) {
-    case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN };
+    case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN, manualDisconnect };
     case "observe": return observe(request.params);
     case "inspect_region": return inspectRegion(request.params || {});
     case "move": return mouseMove(request.params || {});
@@ -343,20 +353,13 @@ async function handleRpc(request) {
     case "new_tab": return newTab(request.params || {});
     case "close_tab": return closeTab(request.params || {});
     case "handle_dialog": return handleDialog(request.params || {});
-    case "attach_active": {
-      const tab = await activeTab();
-      await attach(tab.id);
-      return { success: true, targetId: String(tab.id), visualEpoch };
-    }
-    case "pause": paused = true; await setStatus("paused"); return { success: true };
-    case "resume": paused = false; await setStatus(socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected"); return { success: true };
-    case "disconnect": await detach(); return { success: true };
     default: throw new Error(`Unknown RPC method: ${request.method}`);
   }
 }
 
 async function connectGateway() {
   clearTimeout(reconnectTimer);
+  if (manualDisconnect) return;
   const config = await getConfig();
   if (!config.gatewayUrl) return;
   if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) return;
@@ -381,7 +384,8 @@ async function connectGateway() {
   socket.onclose = async () => {
     await setStatus("disconnected");
     socket = null;
-    if ((await getConfig()).autoReconnect) reconnectTimer = setTimeout(connectGateway, 2000);
+    const config = await getConfig();
+    if (!manualDisconnect && config.autoReconnect) reconnectTimer = setTimeout(connectGateway, 2000);
   };
   socket.onerror = () => setStatus("error");
 }
@@ -404,8 +408,9 @@ chrome.debugger.onDetach.addListener((source) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
-    if (message.type === "getStatus") return { ...(await chrome.storage.local.get(null)), attachedTabId, visualEpoch, paused };
+    if (message.type === "getStatus") return { ...(await chrome.storage.local.get(null)), attachedTabId, visualEpoch, paused, manualDisconnect };
     if (message.type === "saveConfig") {
+      manualDisconnect = false;
       await chrome.storage.local.set(message.config || {});
       if (socket) socket.close(); else connectGateway();
       return { ok: true };
@@ -417,12 +422,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message.type === "togglePause") {
       paused = !paused;
+      invalidateVisualState();
       await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
       return { ok: true, paused };
     }
     if (message.type === "disconnect") {
-      if (socket) socket.close();
+      manualDisconnect = true;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      const closingSocket = socket;
+      socket = null;
+      if (closingSocket) closingSocket.close(1000, "Disconnected by user");
       await detach();
+      await setStatus("disconnected");
       return { ok: true };
     }
     return { ok: false };
