@@ -13,8 +13,7 @@ export interface LaunchedChrome {
 
 export function findChromePath(): string {
   if (process.platform === "darwin") {
-    const defaultMacPath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-    return defaultMacPath;
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   } else if (process.platform === "win32") {
     const local = process.env.LOCALAPPDATA || "";
     return path.join(local, "Google/Chrome/Application/chrome.exe");
@@ -27,11 +26,13 @@ export async function launchRealChrome(options: {
   deviceScaleFactor?: number;
   extraArgs?: string[];
   headless?: boolean;
+  disableBackgroundNetworking?: boolean;
 } = {}): Promise<LaunchedChrome> {
   const chromePath = findChromePath();
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "chrome-cu-test-"));
   const windowSize = options.windowSize || "1280,800";
   const headless = options.headless ?? true;
+  const disableBackgroundNetworking = options.disableBackgroundNetworking ?? true;
 
   const args = [
     "--remote-debugging-port=0",
@@ -39,7 +40,7 @@ export async function launchRealChrome(options: {
     ...(headless ? ["--headless=new"] : []),
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-background-networking",
+    ...(disableBackgroundNetworking ? ["--disable-background-networking"] : []),
     "--disable-sync",
     "--disable-gpu",
     `--window-size=${windowSize}`,
@@ -53,7 +54,6 @@ export async function launchRealChrome(options: {
   });
 
   const activePortFile = path.join(tempDir, "DevToolsActivePort");
-
   const startTime = Date.now();
   let port = 0;
   let wsPath = "";
