@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 export const CoordinateSchema = z.object({
-  x: z.number().describe("X coordinate in CSS pixels or screenshot image pixels"),
-  y: z.number().describe("Y coordinate in CSS pixels or screenshot image pixels"),
+  x: z.number().describe("X coordinate in screenshot image pixels"),
+  y: z.number().describe("Y coordinate in screenshot image pixels"),
 });
 export type Coordinate = z.infer<typeof CoordinateSchema>;
 
@@ -20,62 +20,62 @@ export const ScreenshotActionSchema = z.object({
 
 export const MoveActionSchema = z.object({
   type: z.literal("move"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
 export const ClickActionSchema = z.object({
   type: z.literal("click"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
   button: MouseButtonSchema.optional().default("left"),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
 export const DoubleClickActionSchema = z.object({
   type: z.literal("double_click"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
   button: MouseButtonSchema.optional().default("left"),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
 export const MouseDownActionSchema = z.object({
   type: z.literal("down"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
   button: MouseButtonSchema.optional().default("left"),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
 export const MouseUpActionSchema = z.object({
   type: z.literal("up"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
   button: MouseButtonSchema.optional().default("left"),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
 export const ScrollActionSchema = z.object({
   type: z.literal("scroll"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
   deltaX: z.number().optional().default(0),
   deltaY: z.number().optional().default(0),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
 export const DragActionSchema = z.object({
   type: z.literal("drag"),
+  observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   path: z.array(CoordinateSchema).min(2, "Drag path must have at least 2 points (start and end)"),
-  observationId: z.string().optional(),
   modifiers: z.array(z.string()).optional(),
 });
 
@@ -100,6 +100,10 @@ export const TypeActionSchema = z.object({
   method: TypingMethodSchema.optional().default("auto"),
 });
 
+export const ResetInputActionSchema = z.object({
+  type: z.literal("reset_input"),
+});
+
 export const WaitActionSchema = z.object({
   type: z.literal("wait"),
   ms: z.number().nonnegative(),
@@ -118,6 +122,7 @@ export const ComputerActionSchema = z.discriminatedUnion("type", [
   KeyDownActionSchema,
   KeyUpActionSchema,
   TypeActionSchema,
+  ResetInputActionSchema,
   WaitActionSchema,
 ]);
 
@@ -170,12 +175,12 @@ export const NewWindowActionSchema = z.object({
 
 export const ActivateWindowActionSchema = z.object({
   type: z.literal("activate_window"),
-  targetId: z.string(),
+  windowId: z.number(),
 });
 
 export const CloseWindowActionSchema = z.object({
   type: z.literal("close_window"),
-  targetId: z.string(),
+  windowId: z.number(),
 });
 
 export const DialogStateActionSchema = z.object({

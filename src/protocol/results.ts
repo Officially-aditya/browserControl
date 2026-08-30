@@ -17,8 +17,18 @@ export interface DialogInfo {
   timestamp: number;
 }
 
+export interface CursorPosition {
+  imageX: number;
+  imageY: number;
+  viewportX: number;
+  viewportY: number;
+  x?: number; // Backward compatibility alias for viewportX
+  y?: number; // Backward compatibility alias for viewportY
+}
+
 export interface Observation {
   observationId: string;
+  visualEpoch: number;
   image: string; // Base64 PNG/JPEG/WebP
   imageWidth: number;
   imageHeight: number;
@@ -31,7 +41,7 @@ export interface Observation {
   title?: string;
   coordinateSpace: CoordinateSpace;
   timestamp: number;
-  cursorPosition?: { x: number; y: number };
+  cursorPosition?: CursorPosition;
   activeDialog?: DialogInfo;
 }
 
@@ -50,6 +60,7 @@ export interface ActionResult {
     | "TARGET_CLOSED"
     | "CONNECTION_LOST"
     | "DIALOG_BLOCKING"
+    | "ACTION_CANCELLED"
     | "INVALID_ACTION"
     | "UNKNOWN_ERROR";
   data?: any;

@@ -18,8 +18,9 @@ export {
   StoredObservation,
 } from "./screen/screenshot.js";
 export { decodeImageDimensions, ImageDimensions } from "./screen/image-decoder.js";
+export { InputStateManager, MODIFIERS, BUTTON_BITS } from "./input/state.js";
 export { MouseController } from "./input/mouse.js";
-export { KeyboardController, KeyDefinition, MODIFIERS } from "./input/keyboard.js";
+export { KeyboardController, KeyDefinition } from "./input/keyboard.js";
 export { DragController } from "./input/drag.js";
 export { TabController } from "./browser/tabs.js";
 export { NavigationController } from "./browser/navigation.js";

@@ -8,6 +8,7 @@ import {
   ObservationStore,
 } from "./screen/screenshot.js";
 import { CoordinateMapper } from "./screen/coordinates.js";
+import { InputStateManager } from "./input/state.js";
 import { MouseController } from "./input/mouse.js";
 import { KeyboardController } from "./input/keyboard.js";
 import { DragController } from "./input/drag.js";
@@ -25,28 +26,41 @@ export interface ChromeControllerOptions extends ChromeConnectionOptions {
   autoAttachFirstTab?: boolean;
 }
 
+interface QueueEntry<T = any> {
+  task: (signal: AbortSignal) => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: any) => void;
+  abortController: AbortController;
+  generation: number;
+  settled: boolean;
+}
+
 export class ActionQueue {
-  private queue: Array<() => Promise<void>> = [];
+  private queue: QueueEntry[] = [];
+  private currentEntry: QueueEntry | null = null;
   private isProcessing = false;
   private isAborted = false;
+  private generation = 0;
 
-  public async run<T>(task: () => Promise<T>): Promise<T> {
+  public async run<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.isAborted) {
-      throw new Error("Action queue is aborted / session stopped");
+      throw {
+        errorCode: "ACTION_CANCELLED",
+        message: "Action cancelled: session is stopped or aborted",
+      };
     }
 
+    const abortController = new AbortController();
+    const currentGen = this.generation;
+
     return new Promise<T>((resolve, reject) => {
-      this.queue.push(async () => {
-        if (this.isAborted) {
-          reject(new Error("Action cancelled: session stopped"));
-          return;
-        }
-        try {
-          const res = await task();
-          resolve(res);
-        } catch (err) {
-          reject(err);
-        }
+      this.queue.push({
+        task,
+        resolve,
+        reject,
+        abortController,
+        generation: currentGen,
+        settled: false,
       });
 
       this.processNext();
@@ -54,31 +68,92 @@ export class ActionQueue {
   }
 
   private async processNext(): Promise<void> {
-    if (this.isProcessing || this.queue.length === 0) {
+    if (this.isProcessing || this.queue.length === 0 || this.isAborted) {
       return;
     }
 
     this.isProcessing = true;
-    const task = this.queue.shift();
-    if (task) {
-      try {
-        await task();
-      } finally {
-        this.isProcessing = false;
-        this.processNext();
-      }
-    } else {
+    const entry = this.queue.shift();
+    if (!entry) {
       this.isProcessing = false;
+      return;
+    }
+
+    if (entry.generation !== this.generation || this.isAborted) {
+      if (!entry.settled) {
+        entry.settled = true;
+        entry.reject({
+          errorCode: "ACTION_CANCELLED",
+          message: "Action cancelled: queue generation changed or aborted",
+        });
+      }
+      this.isProcessing = false;
+      this.processNext();
+      return;
+    }
+
+    this.currentEntry = entry;
+    try {
+      const result = await entry.task(entry.abortController.signal);
+      if (entry.generation === this.generation && !this.isAborted && !entry.settled) {
+        entry.settled = true;
+        entry.resolve(result);
+      } else if (!entry.settled) {
+        entry.settled = true;
+        entry.reject({
+          errorCode: "ACTION_CANCELLED",
+          message: "Action cancelled: queue was aborted during execution",
+        });
+      }
+    } catch (err) {
+      if (!entry.settled) {
+        entry.settled = true;
+        entry.reject(err);
+      }
+    } finally {
+      this.currentEntry = null;
+      this.isProcessing = false;
+      this.processNext();
     }
   }
 
   public abort(): void {
     this.isAborted = true;
+    this.generation++;
+
+    if (this.currentEntry) {
+      this.currentEntry.abortController.abort();
+      if (!this.currentEntry.settled) {
+        this.currentEntry.settled = true;
+        this.currentEntry.reject({
+          errorCode: "ACTION_CANCELLED",
+          message: "Action cancelled: session stopped or queue aborted",
+        });
+      }
+      this.currentEntry = null;
+    }
+
+    const pending = [...this.queue];
     this.queue = [];
+
+    for (const item of pending) {
+      item.abortController.abort();
+      if (!item.settled) {
+        item.settled = true;
+        item.reject({
+          errorCode: "ACTION_CANCELLED",
+          message: "Action cancelled: session stopped or queue aborted",
+        });
+      }
+    }
+
+    this.isProcessing = false;
   }
 
   public reset(): void {
+    this.abort();
     this.isAborted = false;
+    this.generation++;
     this.queue = [];
     this.isProcessing = false;
   }
@@ -90,6 +165,7 @@ export class ChromeController {
   public session: TabSession;
   public viewportManager: ViewportManager;
   public observationStore: ObservationStore;
+  public inputState: InputStateManager;
   public screenshotService: ScreenshotService;
   public mouse: MouseController;
   public keyboard: KeyboardController;
@@ -106,15 +182,18 @@ export class ChromeController {
     this.session = new TabSession(this.connection, this.targetManager);
     this.viewportManager = new ViewportManager(this.session);
     this.observationStore = new ObservationStore();
+    this.inputState = new InputStateManager();
+
     this.screenshotService = new ScreenshotService(
       this.session,
       this.viewportManager,
-      this.observationStore
+      this.observationStore,
+      this.inputState
     );
-    this.mouse = new MouseController(this.session);
-    this.keyboard = new KeyboardController(this.session);
-    this.dragController = new DragController(this.session);
-    this.tabController = new TabController(this.targetManager, this.session);
+    this.mouse = new MouseController(this.session, this.inputState);
+    this.keyboard = new KeyboardController(this.session, this.inputState);
+    this.dragController = new DragController(this.session, this.inputState);
+    this.tabController = new TabController(this.connection, this.targetManager, this.session);
     this.navigationController = new NavigationController(this.session);
   }
 
@@ -132,6 +211,14 @@ export class ChromeController {
 
   public get activeDialog(): DialogInfo | null {
     return this.session.activeDialog;
+  }
+
+  /**
+   * Emergency reset for all held keys, buttons, and drag state
+   */
+  public async resetInputState(): Promise<void> {
+    await this.mouse.reset();
+    await this.keyboard.reset();
   }
 
   /**
@@ -160,7 +247,9 @@ export class ChromeController {
    * Disconnect from Chrome
    */
   public async disconnect(): Promise<void> {
+    await this.resetInputState();
     this.actionQueue.abort();
+    this.observationStore.clear();
     await this.session.detach();
     await this.connection.close();
   }
@@ -189,45 +278,106 @@ export class ChromeController {
   }
 
   /**
-   * Resolve and validate coordinate mapper for an incoming action
+   * Resolve and validate coordinate mapper for an incoming action using observationId and visualEpoch
    */
-  private async getMapperForAction(observationId?: string): Promise<CoordinateMapper> {
-    if (observationId) {
-      const stored = this.observationStore.get(observationId);
-      if (!stored) {
-        throw {
-          errorCode: "STALE_OBSERVATION",
-          message: `Observation '${observationId}' not found or expired. Please capture a new screenshot.`,
-        };
-      }
-
-      // Check if target or URL changed
-      if (this.session.targetId !== stored.targetId) {
-        throw {
-          errorCode: "STALE_OBSERVATION",
-          message: `Observation '${observationId}' belonged to tab ${stored.targetId}, but active tab is ${this.session.targetId}. Please capture a new screenshot.`,
-        };
-      }
-
-      if (this.session.currentUrl && stored.url && this.session.currentUrl !== stored.url) {
-        throw {
-          errorCode: "STALE_OBSERVATION",
-          message: `Observation '${observationId}' was captured at '${stored.url}', but current page is '${this.session.currentUrl}'. Please capture a new screenshot.`,
-        };
-      }
-
-      return stored.mapper;
+  private async getMapperForAction(observationId: string): Promise<CoordinateMapper> {
+    const stored = this.observationStore.get(observationId);
+    if (!stored) {
+      throw {
+        errorCode: "STALE_OBSERVATION",
+        message: `Observation '${observationId}' not found or expired. Please capture a new screenshot before acting.`,
+      };
     }
 
-    if (this.screenshotService.currentMapper) {
-      return this.screenshotService.currentMapper;
+    if (this.session.targetId !== stored.targetId) {
+      throw {
+        errorCode: "STALE_OBSERVATION",
+        message: `Observation '${observationId}' belonged to tab ${stored.targetId}, but active tab is ${this.session.targetId}. Please capture a new screenshot.`,
+      };
     }
 
-    // Fallback: create fresh mapper from current metrics
-    const metrics = await this.viewportManager.getMetrics();
-    const w = Math.round(metrics.cssVisualViewport.clientWidth);
-    const h = Math.round(metrics.cssVisualViewport.clientHeight);
-    return CoordinateMapper.create(w, h, w, h, metrics.devicePixelRatio);
+    if (stored.visualEpoch !== this.session.visualEpoch) {
+      throw {
+        errorCode: "STALE_OBSERVATION",
+        message: `Observation '${observationId}' is stale (epoch ${stored.visualEpoch} vs current ${this.session.visualEpoch}). The page has changed since this screenshot was taken. Please capture a new screenshot.`,
+      };
+    }
+
+    return stored.mapper;
+  }
+
+  /**
+   * Execute a raw coordinate action without observationId requirement (lower-level API for tests/diagnostics)
+   */
+  public async executeRawCdpCoordinateAction(
+    actionType: "move" | "click" | "double_click" | "down" | "up" | "scroll",
+    x: number,
+    y: number,
+    button: "left" | "right" | "middle" | "back" | "forward" = "left",
+    deltaX = 0,
+    deltaY = 0
+  ): Promise<ActionResult> {
+    const actId = `raw_${++this.actionCounter}_${Date.now()}`;
+    const startTime = Date.now();
+
+    return this.actionQueue
+      .run(async (signal) => {
+        try {
+          await this.session.executeWithinState(async () => {
+            switch (actionType) {
+              case "move":
+                await this.mouse.move(x, y, 0, signal);
+                break;
+              case "click":
+                await this.mouse.click(x, y, button, 0, signal);
+                break;
+              case "double_click":
+                await this.mouse.doubleClick(x, y, button, 0, signal);
+                break;
+              case "down":
+                await this.mouse.down(x, y, button, 0, signal);
+                break;
+              case "up":
+                await this.mouse.up(x, y, button, 0, signal);
+                break;
+              case "scroll":
+                await this.mouse.scroll(x, y, deltaX, deltaY, 0, signal);
+                break;
+            }
+          });
+          this.session.bumpVisualEpoch();
+
+          return {
+            id: actId,
+            success: true,
+            action: actionType,
+            targetId: this.session.targetId || undefined,
+            url: this.session.currentUrl || undefined,
+            durationMs: Date.now() - startTime,
+          };
+        } catch (err: any) {
+          return {
+            id: actId,
+            success: false,
+            action: actionType,
+            targetId: this.session.targetId || undefined,
+            url: this.session.currentUrl || undefined,
+            durationMs: Date.now() - startTime,
+            errorCode: err.errorCode || "UNKNOWN_ERROR",
+            error: err.message || String(err),
+          };
+        }
+      })
+      .catch((err) => ({
+        id: actId,
+        success: false,
+        action: actionType,
+        targetId: this.session.targetId || undefined,
+        url: this.session.currentUrl || undefined,
+        durationMs: Date.now() - startTime,
+        errorCode: err?.errorCode || "ACTION_CANCELLED",
+        error: err?.message || String(err),
+      }));
   }
 
   /**
@@ -242,7 +392,10 @@ export class ChromeController {
       return {
         id: actId,
         success: false,
-        action: typeof actionInput === "object" && actionInput !== null && "type" in actionInput ? (actionInput as any).type : "unknown",
+        action:
+          typeof actionInput === "object" && actionInput !== null && "type" in actionInput
+            ? (actionInput as any).type
+            : "unknown",
         targetId: this.session.targetId || undefined,
         url: this.session.currentUrl || undefined,
         durationMs: Date.now() - startTime,
@@ -253,164 +406,202 @@ export class ChromeController {
 
     const action: ComputerAction = parsed.data;
 
-    return this.actionQueue.run(async () => {
-      try {
-        let data: any = undefined;
+    return this.actionQueue
+      .run(async (signal) => {
+        try {
+          let data: any = undefined;
 
-        await this.session.executeWithinState(async () => {
-          switch (action.type) {
-            case "screenshot": {
-              data = await this.screenshotService.capture(action);
-              break;
-            }
-
-            case "move": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const boundsCheck = mapper.validateBounds(action.x, action.y);
-              if (!boundsCheck.valid) {
-                throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
-              }
-              const vp = mapper.toViewport(action.x, action.y);
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              this.screenshotService.setCursorPosition(vp.x, vp.y);
-              await this.mouse.move(vp.x, vp.y, modifierBitmask);
-              break;
-            }
-
-            case "click": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const boundsCheck = mapper.validateBounds(action.x, action.y);
-              if (!boundsCheck.valid) {
-                throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
-              }
-              const vp = mapper.toViewport(action.x, action.y);
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              this.screenshotService.setCursorPosition(vp.x, vp.y);
-              await this.mouse.click(vp.x, vp.y, action.button, modifierBitmask);
-              break;
-            }
-
-            case "double_click": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const boundsCheck = mapper.validateBounds(action.x, action.y);
-              if (!boundsCheck.valid) {
-                throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
-              }
-              const vp = mapper.toViewport(action.x, action.y);
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              this.screenshotService.setCursorPosition(vp.x, vp.y);
-              await this.mouse.doubleClick(vp.x, vp.y, action.button, modifierBitmask);
-              break;
-            }
-
-            case "down": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const boundsCheck = mapper.validateBounds(action.x, action.y);
-              if (!boundsCheck.valid) {
-                throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
-              }
-              const vp = mapper.toViewport(action.x, action.y);
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              this.screenshotService.setCursorPosition(vp.x, vp.y);
-              await this.mouse.down(vp.x, vp.y, action.button, modifierBitmask);
-              break;
-            }
-
-            case "up": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const boundsCheck = mapper.validateBounds(action.x, action.y);
-              if (!boundsCheck.valid) {
-                throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
-              }
-              const vp = mapper.toViewport(action.x, action.y);
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              this.screenshotService.setCursorPosition(vp.x, vp.y);
-              await this.mouse.up(vp.x, vp.y, action.button, modifierBitmask);
-              break;
-            }
-
-            case "scroll": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const boundsCheck = mapper.validateBounds(action.x, action.y);
-              if (!boundsCheck.valid) {
-                throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
-              }
-              const vp = mapper.toViewport(action.x, action.y);
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              this.screenshotService.setCursorPosition(vp.x, vp.y);
-              await this.mouse.scroll(vp.x, vp.y, action.deltaX, action.deltaY, modifierBitmask);
-              break;
-            }
-
-            case "drag": {
-              const mapper = await this.getMapperForAction(action.observationId);
-              const mappedPath = [];
-              for (const pt of action.path) {
-                const check = mapper.validateBounds(pt.x, pt.y);
-                if (!check.valid) {
-                  throw { errorCode: "OUT_OF_BOUNDS", message: check.error };
-                }
-                mappedPath.push(mapper.toViewport(pt.x, pt.y));
-              }
-
-              if (mappedPath.length > 0) {
-                const last = mappedPath[mappedPath.length - 1];
-                this.screenshotService.setCursorPosition(last.x, last.y);
-              }
-              const { modifierBitmask } = this.keyboard.parseModifiers(action.modifiers || []);
-              await this.dragController.drag(mappedPath, modifierBitmask);
-              break;
-            }
-
-            case "keypress": {
-              await this.keyboard.keypress(action.keys);
-              break;
-            }
-
-            case "key_down": {
-              await this.keyboard.keyDown(action.key);
-              break;
-            }
-
-            case "key_up": {
-              await this.keyboard.keyUp(action.key);
-              break;
-            }
-
-            case "type": {
-              await this.keyboard.type(action.text, action.method);
-              break;
-            }
-
-            case "wait": {
-              await new Promise((r) => setTimeout(r, action.ms));
-              break;
-            }
+          // Check if blocked by open JavaScript dialog
+          if (this.session.activeDialog !== null && action.type !== "screenshot" && action.type !== "wait") {
+            throw {
+              errorCode: "DIALOG_BLOCKING",
+              message: `A JavaScript dialog [${this.session.activeDialog.type}] "${this.session.activeDialog.message}" is open. Please handle the dialog via browser.action 'handle_dialog' first.`,
+            };
           }
-        });
 
-        return {
-          id: actId,
-          success: true,
-          action: action.type,
-          targetId: this.session.targetId || undefined,
-          url: this.session.currentUrl || undefined,
-          durationMs: Date.now() - startTime,
-          data,
-        };
-      } catch (err: any) {
-        return {
-          id: actId,
-          success: false,
-          action: action.type,
-          targetId: this.session.targetId || undefined,
-          url: this.session.currentUrl || undefined,
-          durationMs: Date.now() - startTime,
-          errorCode: err.errorCode || "UNKNOWN_ERROR",
-          error: err.message || String(err),
-        };
-      }
-    });
+          await this.session.executeWithinState(async () => {
+            switch (action.type) {
+              case "screenshot": {
+                data = await this.screenshotService.capture(action);
+                break;
+              }
+
+              case "move": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const boundsCheck = mapper.validateBounds(action.x, action.y);
+                if (!boundsCheck.valid) {
+                  throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
+                }
+                const vp = mapper.toViewport(action.x, action.y);
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                await this.mouse.move(vp.x, vp.y, explicitMods, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "click": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const boundsCheck = mapper.validateBounds(action.x, action.y);
+                if (!boundsCheck.valid) {
+                  throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
+                }
+                const vp = mapper.toViewport(action.x, action.y);
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                await this.mouse.click(vp.x, vp.y, action.button, explicitMods, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "double_click": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const boundsCheck = mapper.validateBounds(action.x, action.y);
+                if (!boundsCheck.valid) {
+                  throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
+                }
+                const vp = mapper.toViewport(action.x, action.y);
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                await this.mouse.doubleClick(vp.x, vp.y, action.button, explicitMods, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "down": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const boundsCheck = mapper.validateBounds(action.x, action.y);
+                if (!boundsCheck.valid) {
+                  throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
+                }
+                const vp = mapper.toViewport(action.x, action.y);
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                await this.mouse.down(vp.x, vp.y, action.button, explicitMods, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "up": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const boundsCheck = mapper.validateBounds(action.x, action.y);
+                if (!boundsCheck.valid) {
+                  throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
+                }
+                const vp = mapper.toViewport(action.x, action.y);
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                await this.mouse.up(vp.x, vp.y, action.button, explicitMods, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "scroll": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const boundsCheck = mapper.validateBounds(action.x, action.y);
+                if (!boundsCheck.valid) {
+                  throw { errorCode: "OUT_OF_BOUNDS", message: boundsCheck.error };
+                }
+                const vp = mapper.toViewport(action.x, action.y);
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                await this.mouse.scroll(vp.x, vp.y, action.deltaX, action.deltaY, explicitMods, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "drag": {
+                const mapper = await this.getMapperForAction(action.observationId);
+                const mappedPath = [];
+                for (const pt of action.path) {
+                  const check = mapper.validateBounds(pt.x, pt.y);
+                  if (!check.valid) {
+                    throw { errorCode: "OUT_OF_BOUNDS", message: check.error };
+                  }
+                  mappedPath.push(mapper.toViewport(pt.x, pt.y));
+                }
+
+                const explicitMods = this.inputState.parseModifierArray(action.modifiers || []);
+                try {
+                  await this.dragController.drag(mappedPath, explicitMods, signal);
+                } catch (dragErr) {
+                  await this.resetInputState();
+                  throw dragErr;
+                }
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "keypress": {
+                await this.keyboard.keypress(action.keys, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "key_down": {
+                await this.keyboard.keyDown(action.key, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "key_up": {
+                await this.keyboard.keyUp(action.key, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "type": {
+                await this.keyboard.type(action.text, action.method, signal);
+                this.session.bumpVisualEpoch();
+                break;
+              }
+
+              case "reset_input": {
+                await this.resetInputState();
+                break;
+              }
+
+              case "wait": {
+                if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+                const stepMs = 50;
+                let elapsed = 0;
+                while (elapsed < action.ms) {
+                  if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+                  const sleepTime = Math.min(stepMs, action.ms - elapsed);
+                  await new Promise((r) => setTimeout(r, sleepTime));
+                  elapsed += sleepTime;
+                }
+                break;
+              }
+            }
+          });
+
+          return {
+            id: actId,
+            success: true,
+            action: action.type,
+            targetId: this.session.targetId || undefined,
+            url: this.session.currentUrl || undefined,
+            durationMs: Date.now() - startTime,
+            data,
+          };
+        } catch (err: any) {
+          return {
+            id: actId,
+            success: false,
+            action: action.type,
+            targetId: this.session.targetId || undefined,
+            url: this.session.currentUrl || undefined,
+            durationMs: Date.now() - startTime,
+            errorCode: err.errorCode || (err.message === "ACTION_CANCELLED" ? "ACTION_CANCELLED" : "UNKNOWN_ERROR"),
+            error: err.message || String(err),
+          };
+        }
+      })
+      .catch((err) => ({
+        id: actId,
+        success: false,
+        action: action.type,
+        targetId: this.session.targetId || undefined,
+        url: this.session.currentUrl || undefined,
+        durationMs: Date.now() - startTime,
+        errorCode: err?.errorCode || "ACTION_CANCELLED",
+        error: err?.message || String(err),
+      }));
   }
 
   /**
@@ -425,7 +616,10 @@ export class ChromeController {
       return {
         id: actId,
         success: false,
-        action: typeof actionInput === "object" && actionInput !== null && "type" in actionInput ? (actionInput as any).type : "unknown",
+        action:
+          typeof actionInput === "object" && actionInput !== null && "type" in actionInput
+            ? (actionInput as any).type
+            : "unknown",
         targetId: this.session.targetId || undefined,
         url: this.session.currentUrl || undefined,
         durationMs: Date.now() - startTime,
@@ -436,105 +630,130 @@ export class ChromeController {
 
     const action: BrowserAction = parsed.data;
 
-    return this.actionQueue.run(async () => {
-      try {
-        let data: any = undefined;
+    return this.actionQueue
+      .run(async (signal) => {
+        try {
+          let data: any = undefined;
 
-        switch (action.type) {
-          case "navigate": {
-            await this.navigationController.navigate(action.url);
-            break;
+          switch (action.type) {
+            case "navigate": {
+              await this.navigationController.navigate(action.url);
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "new_tab": {
+              data = await this.tabController.newTab(action.url);
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "switch_tab": {
+              await this.resetInputState();
+              await this.tabController.switchTab(action.targetId);
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "close_tab": {
+              await this.resetInputState();
+              this.observationStore.invalidateTarget(action.targetId);
+              data = { closed: await this.tabController.closeTab(action.targetId) };
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "back": {
+              await this.navigationController.back();
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "forward": {
+              await this.navigationController.forward();
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "reload": {
+              await this.navigationController.reload();
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "tabs": {
+              data = await this.getTabs();
+              break;
+            }
+
+            case "windows": {
+              data = await this.getWindows();
+              break;
+            }
+
+            case "new_window": {
+              data = await this.tabController.newWindow(action.url);
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "activate_window": {
+              await this.tabController.activateWindow(action.windowId);
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "close_window": {
+              data = { closed: await this.tabController.closeWindow(action.windowId) };
+              this.session.bumpVisualEpoch();
+              break;
+            }
+
+            case "dialog_state": {
+              data = { activeDialog: this.session.activeDialog };
+              break;
+            }
+
+            case "handle_dialog": {
+              await this.session.handleDialog(action.accept, action.promptText);
+              data = { handled: true };
+              this.session.bumpVisualEpoch();
+              break;
+            }
           }
 
-          case "new_tab": {
-            data = await this.tabController.newTab(action.url);
-            break;
-          }
-
-          case "switch_tab": {
-            await this.tabController.switchTab(action.targetId);
-            break;
-          }
-
-          case "close_tab": {
-            data = { closed: await this.tabController.closeTab(action.targetId) };
-            break;
-          }
-
-          case "back": {
-            await this.navigationController.back();
-            break;
-          }
-
-          case "forward": {
-            await this.navigationController.forward();
-            break;
-          }
-
-          case "reload": {
-            await this.navigationController.reload();
-            break;
-          }
-
-          case "tabs": {
-            data = await this.getTabs();
-            break;
-          }
-
-          case "windows": {
-            data = await this.getWindows();
-            break;
-          }
-
-          case "new_window": {
-            data = await this.tabController.newWindow(action.url);
-            break;
-          }
-
-          case "activate_window": {
-            await this.tabController.switchTab(action.targetId);
-            break;
-          }
-
-          case "close_window": {
-            data = { closed: await this.tabController.closeTab(action.targetId) };
-            break;
-          }
-
-          case "dialog_state": {
-            data = { activeDialog: this.session.activeDialog };
-            break;
-          }
-
-          case "handle_dialog": {
-            await this.session.handleDialog(action.accept, action.promptText);
-            data = { handled: true };
-            break;
-          }
+          return {
+            id: actId,
+            success: true,
+            action: action.type,
+            targetId: this.session.targetId || undefined,
+            url: this.session.currentUrl || undefined,
+            durationMs: Date.now() - startTime,
+            data,
+          };
+        } catch (err: any) {
+          return {
+            id: actId,
+            success: false,
+            action: action.type,
+            targetId: this.session.targetId || undefined,
+            url: this.session.currentUrl || undefined,
+            durationMs: Date.now() - startTime,
+            errorCode: err.errorCode || "UNKNOWN_ERROR",
+            error: err.message || String(err),
+          };
         }
-
-        return {
-          id: actId,
-          success: true,
-          action: action.type,
-          targetId: this.session.targetId || undefined,
-          url: this.session.currentUrl || undefined,
-          durationMs: Date.now() - startTime,
-          data,
-        };
-      } catch (err: any) {
-        return {
-          id: actId,
-          success: false,
-          action: action.type,
-          targetId: this.session.targetId || undefined,
-          url: this.session.currentUrl || undefined,
-          durationMs: Date.now() - startTime,
-          errorCode: err.errorCode || "UNKNOWN_ERROR",
-          error: err.message || String(err),
-        };
-      }
-    });
+      })
+      .catch((err) => ({
+        id: actId,
+        success: false,
+        action: action.type,
+        targetId: this.session.targetId || undefined,
+        url: this.session.currentUrl || undefined,
+        durationMs: Date.now() - startTime,
+        errorCode: err?.errorCode || "ACTION_CANCELLED",
+        error: err?.message || String(err),
+      }));
   }
 
   /**
@@ -545,6 +764,7 @@ export class ChromeController {
     wsUrl: string;
     targetId: string | null;
     currentUrl: string;
+    visualEpoch: number;
     viewport?: { width: number; height: number; dpr: number; zoom?: number };
     screenshot?: { imageWidth: number; imageHeight: number; scaleX: number; scaleY: number };
     activeDialog?: DialogInfo | null;
@@ -553,6 +773,7 @@ export class ChromeController {
     const wsUrl = this.connection.wsUrl;
     const targetId = this.session.targetId;
     const currentUrl = this.session.currentUrl;
+    const visualEpoch = this.session.visualEpoch;
 
     if (!connected || !targetId) {
       return {
@@ -560,6 +781,7 @@ export class ChromeController {
         wsUrl,
         targetId,
         currentUrl,
+        visualEpoch,
         activeDialog: this.session.activeDialog,
       };
     }
@@ -572,6 +794,7 @@ export class ChromeController {
       wsUrl,
       targetId,
       currentUrl,
+      visualEpoch: this.session.visualEpoch,
       viewport: {
         width: Math.round(metrics.cssVisualViewport.clientWidth),
         height: Math.round(metrics.cssVisualViewport.clientHeight),
@@ -589,7 +812,9 @@ export class ChromeController {
   }
 
   public async stop(): Promise<void> {
+    await this.resetInputState();
     this.actionQueue.abort();
+    this.observationStore.clear();
     await this.session.stop();
   }
 

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { MouseController } from "../../src/input/mouse.js";
 import { DragController } from "../../src/input/drag.js";
+import { InputStateManager } from "../../src/input/state.js";
 
-describe("Mouse & Drag Controllers", () => {
-  it("should dispatch correct CDP mouse event sequence for click", async () => {
+describe("Mouse & Drag Controllers with InputStateManager", () => {
+  it("should dispatch correct CDP mouse event sequence for click and update state", async () => {
     const sentMessages: Array<{ method: string; params: any }> = [];
 
     const mockSession = {
@@ -13,21 +14,21 @@ describe("Mouse & Drag Controllers", () => {
       }),
     } as any;
 
-    const mouse = new MouseController(mockSession);
+    const inputState = new InputStateManager();
+    const mouse = new MouseController(mockSession, inputState);
     await mouse.click(350, 200, "left");
 
     expect(sentMessages.length).toBe(3);
-    // 1. mouseMoved
     expect(sentMessages[0].method).toBe("Input.dispatchMouseEvent");
     expect(sentMessages[0].params).toEqual({
       type: "mouseMoved",
       x: 350,
       y: 200,
       button: "none",
+      buttons: 0,
       modifiers: 0,
     });
 
-    // 2. mousePressed
     expect(sentMessages[1].method).toBe("Input.dispatchMouseEvent");
     expect(sentMessages[1].params).toEqual({
       type: "mousePressed",
@@ -39,7 +40,6 @@ describe("Mouse & Drag Controllers", () => {
       modifiers: 0,
     });
 
-    // 3. mouseReleased
     expect(sentMessages[2].method).toBe("Input.dispatchMouseEvent");
     expect(sentMessages[2].params).toEqual({
       type: "mouseReleased",
@@ -54,7 +54,7 @@ describe("Mouse & Drag Controllers", () => {
     expect(mouse.position).toEqual({ x: 350, y: 200 });
   });
 
-  it("should dispatch double click with clickCount 1 and 2", async () => {
+  it("should preserve pressed buttons in InputState during down -> move -> up sequence", async () => {
     const sentMessages: Array<{ method: string; params: any }> = [];
     const mockSession = {
       send: vi.fn().mockImplementation((method: string, params: any) => {
@@ -63,13 +63,20 @@ describe("Mouse & Drag Controllers", () => {
       }),
     } as any;
 
-    const mouse = new MouseController(mockSession);
-    await mouse.doubleClick(100, 150);
+    const inputState = new InputStateManager();
+    const mouse = new MouseController(mockSession, inputState);
 
-    const pressEvents = sentMessages.filter((m) => m.params?.type === "mousePressed");
-    expect(pressEvents.length).toBe(2);
-    expect(pressEvents[0].params.clickCount).toBe(1);
-    expect(pressEvents[1].params.clickCount).toBe(2);
+    // 1. Mouse down left button
+    await mouse.down(100, 100, "left");
+    expect(inputState.buttonsBitmask).toBe(1);
+
+    // 2. Move while button is held
+    await mouse.move(150, 100);
+    expect(sentMessages[sentMessages.length - 1].params.buttons).toBe(1);
+
+    // 3. Mouse up
+    await mouse.up(150, 100, "left");
+    expect(inputState.buttonsBitmask).toBe(0);
   });
 
   it("should split large scrolls into smooth increments", async () => {
@@ -81,8 +88,9 @@ describe("Mouse & Drag Controllers", () => {
       }),
     } as any;
 
-    const mouse = new MouseController(mockSession);
-    await mouse.scroll(200, 300, 0, 400); // 400px scroll split into chunks <= 120px
+    const inputState = new InputStateManager();
+    const mouse = new MouseController(mockSession, inputState);
+    await mouse.scroll(200, 300, 0, 400);
 
     const wheelEvents = sentMessages.filter((m) => m.params?.type === "mouseWheel");
     expect(wheelEvents.length).toBeGreaterThanOrEqual(3);
@@ -100,7 +108,8 @@ describe("Mouse & Drag Controllers", () => {
       }),
     } as any;
 
-    const drag = new DragController(mockSession);
+    const inputState = new InputStateManager();
+    const drag = new DragController(mockSession, inputState);
     await drag.drag([
       { x: 100, y: 100 },
       { x: 150, y: 120 },

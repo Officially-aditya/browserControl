@@ -23,6 +23,7 @@ export class TabSession extends EventEmitter {
   private _currentTitle = "";
   private _lastActionTime = 0;
   private _activeDialog: DialogInfo | null = null;
+  private _visualEpoch = 1;
   private isPaused = false;
 
   private activeSessionListeners: Array<{ event: string; fn: (...args: any[]) => void }> = [];
@@ -56,6 +57,14 @@ export class TabSession extends EventEmitter {
 
   public get activeDialog(): DialogInfo | null {
     return this._activeDialog;
+  }
+
+  public get visualEpoch(): number {
+    return this._visualEpoch;
+  }
+
+  public bumpVisualEpoch(): number {
+    return ++this._visualEpoch;
   }
 
   public get isReady(): boolean {
@@ -117,6 +126,7 @@ export class TabSession extends EventEmitter {
 
     this.setState("ATTACHING");
     this._targetId = targetId;
+    this.bumpVisualEpoch();
 
     try {
       this._sessionId = await this.targetManager.attachToTarget(targetId);
@@ -126,6 +136,7 @@ export class TabSession extends EventEmitter {
       const onFrameNavigated = (params: { frame: { id: string; parentId?: string; url: string } }) => {
         if (!params.frame.parentId) {
           this._currentUrl = params.frame.url;
+          this.bumpVisualEpoch();
           this.emit("navigated", { url: params.frame.url });
         }
       };
@@ -133,6 +144,7 @@ export class TabSession extends EventEmitter {
 
       // 2. Load events
       const onLoadFired = () => {
+        this.bumpVisualEpoch();
         this.emit("loadFired");
       };
       this.addSessionListener(`session:${sid}:Page.loadEventFired`, onLoadFired);
@@ -151,12 +163,14 @@ export class TabSession extends EventEmitter {
           url: params.url,
           timestamp: Date.now(),
         };
+        this.bumpVisualEpoch();
         this.emit("dialogOpening", this._activeDialog);
       };
       this.addSessionListener(`session:${sid}:Page.javascriptDialogOpening`, onDialogOpening);
 
       const onDialogClosed = () => {
         this._activeDialog = null;
+        this.bumpVisualEpoch();
         this.emit("dialogClosed");
       };
       this.addSessionListener(`session:${sid}:Page.javascriptDialogClosed`, onDialogClosed);
@@ -195,6 +209,7 @@ export class TabSession extends EventEmitter {
     }
     await this.connection.send("Page.handleJavaScriptDialog", params, this._sessionId);
     this._activeDialog = null;
+    this.bumpVisualEpoch();
   }
 
   /**
@@ -203,6 +218,7 @@ export class TabSession extends EventEmitter {
   public async detach(): Promise<void> {
     this.clearSessionListeners();
     this._activeDialog = null;
+    this.bumpVisualEpoch();
 
     if (this._sessionId) {
       const sid = this._sessionId;

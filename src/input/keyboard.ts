@@ -1,20 +1,12 @@
 import { TabSession } from "../chrome/session.js";
 import { TypingMethod } from "../protocol/actions.js";
-
-// CDP Modifier bitflags
-export const MODIFIERS = {
-  Alt: 1,
-  Control: 2,
-  Meta: 4,
-  Shift: 8,
-} as const;
+import { InputStateManager, MODIFIERS } from "./state.js";
 
 export interface KeyDefinition {
   key: string;
   code: string;
   windowsVirtualKeyCode: number;
   text?: string;
-  shiftKey?: string;
 }
 
 const SPECIAL_KEYS: Record<string, KeyDefinition> = {
@@ -88,9 +80,11 @@ const PUNCTUATION_MAP: Record<string, { code: string; keyCode: number; unshifted
 
 export class KeyboardController {
   private session: TabSession;
+  private inputState: InputStateManager;
 
-  constructor(session: TabSession) {
+  constructor(session: TabSession, inputState: InputStateManager) {
     this.session = session;
+    this.inputState = inputState;
   }
 
   public parseModifiers(keys: string[]): { modifierBitmask: number; nonModifierKeys: string[] } {
@@ -134,7 +128,7 @@ export class KeyboardController {
     if (keyStr.length === 1) {
       const char = keyStr;
       const upper = char.toUpperCase();
-      const isLetter = char >= "a" && char <= "z" || (char >= "A" && char <= "Z");
+      const isLetter = (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
       const isDigit = char >= "0" && char <= "9";
 
       const code = isLetter
@@ -159,10 +153,30 @@ export class KeyboardController {
   }
 
   /**
-   * Dispatch single key down
+   * Get editing command names for shortcuts (e.g. Meta+A -> SelectAll, Meta+C -> Copy)
    */
-  public async keyDown(key: string, modifiers = 0): Promise<void> {
+  private getEditingCommands(keyStr: string, hasCommandModifier: boolean, hasShift: boolean): string[] {
+    if (!hasCommandModifier) return [];
+    const lower = keyStr.toLowerCase();
+    if (lower === "a") return ["SelectAll"];
+    if (lower === "c") return ["Copy"];
+    if (lower === "v") return ["Paste"];
+    if (lower === "x") return ["Cut"];
+    if (lower === "z") return hasShift ? ["Redo"] : ["Undo"];
+    if (lower === "y") return ["Redo"];
+    return [];
+  }
+
+  /**
+   * Dispatch single key down and record into InputState
+   */
+  public async keyDown(key: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+
+    this.inputState.setKeyDown(key);
+    const modifiers = this.inputState.modifierBitmask;
     const def = this.getKeyDefinition(key);
+
     await this.session.send("Input.dispatchKeyEvent", {
       type: "rawKeyDown",
       modifiers,
@@ -173,10 +187,15 @@ export class KeyboardController {
   }
 
   /**
-   * Dispatch single key up
+   * Dispatch single key up and remove from InputState
    */
-  public async keyUp(key: string, modifiers = 0): Promise<void> {
+  public async keyUp(key: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+
     const def = this.getKeyDefinition(key);
+    const modifiers = this.inputState.modifierBitmask;
+    this.inputState.setKeyUp(key);
+
     await this.session.send("Input.dispatchKeyEvent", {
       type: "keyUp",
       modifiers,
@@ -189,45 +208,57 @@ export class KeyboardController {
   /**
    * Dispatch complete key combination / shortcut
    */
-  public async keypress(keys: string[]): Promise<void> {
+  public async keypress(keys: string[], signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error("ACTION_CANCELLED");
     if (!keys.length) return;
 
     const { modifierBitmask, nonModifierKeys } = this.parseModifiers(keys);
+    const effectiveModifiers = this.inputState.getEffectiveModifiers(modifierBitmask);
 
     if (nonModifierKeys.length === 0) {
       for (const key of keys) {
-        await this.keyDown(key, modifierBitmask);
+        await this.keyDown(key, signal);
         await new Promise((r) => setTimeout(r, 20));
-        await this.keyUp(key, 0);
+        await this.keyUp(key, signal);
       }
       return;
     }
 
     const isMac = process.platform === "darwin";
-    let effectiveModifiers = modifierBitmask;
-    if (!isMac && (effectiveModifiers & MODIFIERS.Meta)) {
-      effectiveModifiers = (effectiveModifiers & ~MODIFIERS.Meta) | MODIFIERS.Control;
+    let platformAdjustedModifiers = effectiveModifiers;
+    if (!isMac && (platformAdjustedModifiers & MODIFIERS.Meta)) {
+      platformAdjustedModifiers = (platformAdjustedModifiers & ~MODIFIERS.Meta) | MODIFIERS.Control;
     }
 
-    for (const key of nonModifierKeys) {
-      const def = this.getKeyDefinition(key);
+    const hasCommandModifier = (platformAdjustedModifiers & (MODIFIERS.Meta | MODIFIERS.Control)) !== 0;
+    const hasShift = (platformAdjustedModifiers & MODIFIERS.Shift) !== 0;
 
-      await this.session.send("Input.dispatchKeyEvent", {
+    for (const key of nonModifierKeys) {
+      if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+
+      const def = this.getKeyDefinition(key);
+      const commands = this.getEditingCommands(def.key, hasCommandModifier, hasShift);
+
+      const keyParams: any = {
         type: "rawKeyDown",
-        modifiers: effectiveModifiers,
+        modifiers: platformAdjustedModifiers,
         key: def.key,
         code: def.code,
         windowsVirtualKeyCode: def.windowsVirtualKeyCode,
         text: def.text,
         unmodifiedText: def.text,
-      });
+      };
 
-      // Only dispatch 'char' event if no command modifiers (Cmd/Ctrl) are active
-      const hasCommandModifier = (effectiveModifiers & (MODIFIERS.Meta | MODIFIERS.Control)) !== 0;
+      if (commands.length > 0) {
+        keyParams.commands = commands;
+      }
+
+      await this.session.send("Input.dispatchKeyEvent", keyParams);
+
       if (def.text && !hasCommandModifier) {
         await this.session.send("Input.dispatchKeyEvent", {
           type: "char",
-          modifiers: effectiveModifiers,
+          modifiers: platformAdjustedModifiers,
           key: def.key,
           code: def.code,
           text: def.text,
@@ -236,10 +267,11 @@ export class KeyboardController {
       }
 
       await new Promise((r) => setTimeout(r, 25));
+      if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
       await this.session.send("Input.dispatchKeyEvent", {
         type: "keyUp",
-        modifiers: effectiveModifiers,
+        modifiers: platformAdjustedModifiers,
         key: def.key,
         code: def.code,
         windowsVirtualKeyCode: def.windowsVirtualKeyCode,
@@ -248,31 +280,87 @@ export class KeyboardController {
   }
 
   /**
-   * Insert or type text using either insertText or sequence of key events
+   * Type text using keyboard events or insertText
+   * "auto" mode dispatches key events and insertText fallback for 100% universal support
+   * across input, textarea, contenteditable, and canvas.
    */
-  public async type(text: string, method: TypingMethod = "auto"): Promise<void> {
+  public async type(text: string, method: TypingMethod = "auto", signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error("ACTION_CANCELLED");
     if (!text) return;
 
-    if (method === "insert_text" || method === "auto") {
+    if (method === "insert_text") {
       await this.session.send("Input.insertText", { text });
       return;
     }
 
-    // method === "key_events" (Local rapid event dispatch for canvas/custom input listeners)
+    if (method === "key_events") {
+      for (let i = 0; i < text.length; i++) {
+        if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+
+        const char = text[i];
+        if (char === "\n") {
+          await this.keypress(["Enter"], signal);
+        } else if (char === "\t") {
+          await this.keypress(["Tab"], signal);
+        } else {
+          const def = this.getKeyDefinition(char);
+          const isUpperCase = char >= "A" && char <= "Z";
+          const charModifiers = isUpperCase ? (this.inputState.modifierBitmask | MODIFIERS.Shift) : this.inputState.modifierBitmask;
+
+          await this.session.send("Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            modifiers: charModifiers,
+            key: def.key,
+            code: def.code,
+            windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+            text: char,
+            unmodifiedText: char,
+          });
+
+          await this.session.send("Input.dispatchKeyEvent", {
+            type: "char",
+            modifiers: charModifiers,
+            key: def.key,
+            code: def.code,
+            text: char,
+            unmodifiedText: char,
+          });
+
+          await this.session.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            modifiers: charModifiers,
+            key: def.key,
+            code: def.code,
+            windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+          });
+        }
+
+        if (text.length > 1) {
+          await new Promise((r) => setTimeout(r, 8));
+        }
+      }
+      return;
+    }
+
+    // Default "auto": dispatches keydown events + insertText to guarantee compatibility
+    // with both DOM inputs (input/textarea/contenteditable) and canvas listeners
     for (let i = 0; i < text.length; i++) {
+      if (signal?.aborted) throw new Error("ACTION_CANCELLED");
       const char = text[i];
+
       if (char === "\n") {
-        await this.keypress(["Enter"]);
+        await this.keypress(["Enter"], signal);
       } else if (char === "\t") {
-        await this.keypress(["Tab"]);
+        await this.keypress(["Tab"], signal);
       } else {
         const def = this.getKeyDefinition(char);
         const isUpperCase = char >= "A" && char <= "Z";
-        const modifiers = isUpperCase ? MODIFIERS.Shift : 0;
+        const charModifiers = isUpperCase ? (this.inputState.modifierBitmask | MODIFIERS.Shift) : this.inputState.modifierBitmask;
 
+        // 1. Dispatch key event for listeners
         await this.session.send("Input.dispatchKeyEvent", {
           type: "rawKeyDown",
-          modifiers,
+          modifiers: charModifiers,
           key: def.key,
           code: def.code,
           windowsVirtualKeyCode: def.windowsVirtualKeyCode,
@@ -280,18 +368,13 @@ export class KeyboardController {
           unmodifiedText: char,
         });
 
-        await this.session.send("Input.dispatchKeyEvent", {
-          type: "char",
-          modifiers,
-          key: def.key,
-          code: def.code,
-          text: char,
-          unmodifiedText: char,
-        });
+        // 2. Insert text character
+        await this.session.send("Input.insertText", { text: char });
 
+        // 3. Dispatch keyUp
         await this.session.send("Input.dispatchKeyEvent", {
           type: "keyUp",
-          modifiers,
+          modifiers: charModifiers,
           key: def.key,
           code: def.code,
           windowsVirtualKeyCode: def.windowsVirtualKeyCode,
@@ -299,8 +382,27 @@ export class KeyboardController {
       }
 
       if (text.length > 1) {
-        await new Promise((r) => setTimeout(r, 10));
+        await new Promise((r) => setTimeout(r, 6));
       }
+    }
+  }
+
+  /**
+   * Reset all held keyboard keys
+   */
+  public async reset(): Promise<void> {
+    const { releasedKeys } = this.inputState.reset();
+    for (const key of releasedKeys) {
+      try {
+        const def = this.getKeyDefinition(key);
+        await this.session.send("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          modifiers: 0,
+          key: def.key,
+          code: def.code,
+          windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+        });
+      } catch {}
     }
   }
 }

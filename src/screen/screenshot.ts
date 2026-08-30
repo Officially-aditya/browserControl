@@ -1,8 +1,10 @@
+import { PNG } from "pngjs";
 import { TabSession } from "../chrome/session.js";
 import { ViewportManager } from "./viewport.js";
 import { CoordinateMapper } from "./coordinates.js";
 import { decodeImageDimensions } from "./image-decoder.js";
-import { Observation } from "../protocol/results.js";
+import { InputStateManager } from "../input/state.js";
+import { Observation, CursorPosition } from "../protocol/results.js";
 
 export interface ScreenshotOptions {
   format?: "png" | "jpeg" | "webp";
@@ -14,6 +16,7 @@ export interface ScreenshotOptions {
 export interface StoredObservation {
   observationId: string;
   targetId: string;
+  visualEpoch: number;
   url: string;
   viewportWidth: number;
   viewportHeight: number;
@@ -39,6 +42,20 @@ export class ObservationStore {
     return this.observations.get(observationId);
   }
 
+  public isValid(observationId: string, currentTargetId: string, currentEpoch: number): boolean {
+    const stored = this.observations.get(observationId);
+    if (!stored) return false;
+    return stored.targetId === currentTargetId && stored.visualEpoch === currentEpoch;
+  }
+
+  public invalidateTarget(targetId: string): void {
+    for (const [id, obs] of this.observations.entries()) {
+      if (obs.targetId === targetId) {
+        this.observations.delete(id);
+      }
+    }
+  }
+
   public clear(): void {
     this.observations.clear();
   }
@@ -48,30 +65,69 @@ export class ScreenshotService {
   private session: TabSession;
   private viewportManager: ViewportManager;
   private observationStore: ObservationStore;
+  private inputState: InputStateManager;
   private lastMapper: CoordinateMapper | null = null;
-  private lastCursorPosition: { x: number; y: number } | null = null;
   private obsCounter = 0;
 
   constructor(
     session: TabSession,
     viewportManager: ViewportManager,
-    observationStore: ObservationStore
+    observationStore: ObservationStore,
+    inputState: InputStateManager
   ) {
     this.session = session;
     this.viewportManager = viewportManager;
     this.observationStore = observationStore;
-  }
-
-  public setCursorPosition(x: number, y: number): void {
-    this.lastCursorPosition = { x, y };
-  }
-
-  public get currentCursorPosition(): { x: number; y: number } | null {
-    return this.lastCursorPosition;
+    this.inputState = inputState;
   }
 
   public get currentMapper(): CoordinateMapper | null {
     return this.lastMapper;
+  }
+
+  /**
+   * Draw a small crosshair pointer onto a PNG buffer at image-space (x, y)
+   */
+  private drawCursorOnPng(pngBuffer: Buffer, targetX: number, targetY: number): Buffer {
+    try {
+      const png = PNG.sync.read(pngBuffer);
+      const width = png.width;
+      const height = png.height;
+      const radius = 6;
+
+      const setPixel = (px: number, py: number, r: number, g: number, b: number, a = 255) => {
+        if (px >= 0 && px < width && py >= 0 && py < height) {
+          const idx = (width * py + px) << 2;
+          png.data[idx] = r;
+          png.data[idx + 1] = g;
+          png.data[idx + 2] = b;
+          png.data[idx + 3] = a;
+        }
+      };
+
+      const cx = Math.round(targetX);
+      const cy = Math.round(targetY);
+
+      // Draw red crosshair with white border
+      for (let offset = -radius; offset <= radius; offset++) {
+        // Horizontal bar
+        setPixel(cx + offset, cy - 1, 255, 255, 255);
+        setPixel(cx + offset, cy, 239, 68, 68); // #ef4444
+        setPixel(cx + offset, cy + 1, 255, 255, 255);
+
+        // Vertical bar
+        setPixel(cx - 1, cy + offset, 255, 255, 255);
+        setPixel(cx, cy + offset, 239, 68, 68);
+        setPixel(cx + 1, cy + offset, 255, 255, 255);
+      }
+
+      // Center dot
+      setPixel(cx, cy, 255, 255, 255);
+
+      return Buffer.from(PNG.sync.write(png));
+    } catch {
+      return pngBuffer;
+    }
   }
 
   /**
@@ -107,7 +163,7 @@ export class ScreenshotService {
     }
 
     const res = await this.session.send<{ data: string }>("Page.captureScreenshot", captureParams);
-    const imageBuffer = Buffer.from(res.data, "base64");
+    let imageBuffer: Buffer = Buffer.from(res.data, "base64");
 
     // Decode actual image pixel dimensions from binary header
     const decoded = decodeImageDimensions(imageBuffer);
@@ -124,12 +180,22 @@ export class ScreenshotService {
     );
     this.lastMapper = mapper;
 
-    const obsId = `obs_${++this.obsCounter}_${Date.now()}`;
+    const cursorVpX = this.inputState.cursorX;
+    const cursorVpY = this.inputState.cursorY;
+    const imgCursor = mapper.toImage(cursorVpX, cursorVpY);
 
-    // Store in observation history for validation
+    if (options.showCursor && format === "png") {
+      imageBuffer = this.drawCursorOnPng(imageBuffer, imgCursor.x, imgCursor.y);
+    }
+
+    const obsId = `obs_${++this.obsCounter}_${Date.now()}`;
+    const epoch = this.session.visualEpoch;
+
+    // Store in observation history with visualEpoch
     this.observationStore.save({
       observationId: obsId,
       targetId: this.session.targetId || "",
+      visualEpoch: epoch,
       url: this.session.currentUrl || "",
       viewportWidth: cssViewportWidth,
       viewportHeight: cssViewportHeight,
@@ -141,9 +207,19 @@ export class ScreenshotService {
 
     const activeDialog = this.session.activeDialog || undefined;
 
+    const cursorPosition: CursorPosition = {
+      imageX: imgCursor.x,
+      imageY: imgCursor.y,
+      viewportX: cursorVpX,
+      viewportY: cursorVpY,
+      x: cursorVpX,
+      y: cursorVpY,
+    };
+
     const observation: Observation = {
       observationId: obsId,
-      image: res.data,
+      visualEpoch: epoch,
+      image: imageBuffer.toString("base64"),
       imageWidth,
       imageHeight,
       viewportWidth: cssViewportWidth,
@@ -155,7 +231,7 @@ export class ScreenshotService {
       title: this.session.currentTitle || "",
       coordinateSpace: mapper.coordinateSpace,
       timestamp: Date.now(),
-      cursorPosition: this.lastCursorPosition || undefined,
+      cursorPosition,
       activeDialog,
     };
 

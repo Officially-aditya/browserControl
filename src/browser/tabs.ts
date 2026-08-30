@@ -1,12 +1,15 @@
+import { ChromeConnection } from "../chrome/connection.js";
 import { TargetManager } from "../chrome/targets.js";
 import { TabSession } from "../chrome/session.js";
 import { TabInfo, WindowInfo } from "../protocol/results.js";
 
 export class TabController {
+  private connection: ChromeConnection;
   private targetManager: TargetManager;
   private session: TabSession;
 
-  constructor(targetManager: TargetManager, session: TabSession) {
+  constructor(connection: ChromeConnection, targetManager: TargetManager, session: TabSession) {
+    this.connection = connection;
     this.targetManager = targetManager;
     this.session = session;
   }
@@ -49,37 +52,108 @@ export class TabController {
   }
 
   /**
-   * List browser windows / contexts
+   * List real browser windows using CDP Browser.getWindowForTarget and Browser.getWindowBounds
    */
   public async listWindows(): Promise<WindowInfo[]> {
     const tabs = await this.listTabs();
-    // Group tabs by browserContextId or window representation
-    const windowMap = new Map<string, string[]>();
+    const windowMap = new Map<number, { bounds?: WindowInfo["bounds"]; targetIds: string[] }>();
+
     for (const tab of tabs) {
-      const ctx = tab.browserContextId || "default_window";
-      const list = windowMap.get(ctx) || [];
-      list.push(tab.targetId);
-      windowMap.set(ctx, list);
+      try {
+        const winInfo = await this.connection.send<{
+          windowId: number;
+          bounds: { left?: number; top?: number; width?: number; height?: number; windowState?: string };
+        }>("Browser.getWindowForTarget", { targetId: tab.targetId });
+
+        const winId = winInfo.windowId;
+        const entry = windowMap.get(winId) || { bounds: winInfo.bounds, targetIds: [] };
+        entry.targetIds.push(tab.targetId);
+        if (winInfo.bounds) {
+          entry.bounds = winInfo.bounds;
+        }
+        windowMap.set(winId, entry);
+      } catch {
+        // Fallback for headless or environments where getWindowForTarget is unavailable
+        const fallbackWinId = 1;
+        const entry = windowMap.get(fallbackWinId) || { targetIds: [] };
+        entry.targetIds.push(tab.targetId);
+        windowMap.set(fallbackWinId, entry);
+      }
     }
 
     const windows: WindowInfo[] = [];
-    let winIdx = 1;
-    for (const [, targetIds] of windowMap.entries()) {
+    for (const [windowId, data] of windowMap.entries()) {
       windows.push({
-        windowId: winIdx++,
-        targetIds,
-        activeTargetId: targetIds.find((id) => id === this.session.targetId) || targetIds[0],
+        windowId,
+        bounds: data.bounds,
+        targetIds: data.targetIds,
+        activeTargetId: data.targetIds.find((id) => id === this.session.targetId) || data.targetIds[0],
       });
     }
+
     return windows;
   }
 
   /**
-   * Open a new browser window
+   * Create a new browser window using Target.createTarget({ newWindow: true })
    */
-  public async newWindow(url = "about:blank"): Promise<{ targetId: string }> {
-    const targetId = await this.targetManager.createTab(url);
+  public async newWindow(url = "about:blank"): Promise<{ targetId: string; windowId?: number }> {
+    const res = await this.connection.send<{ targetId: string }>("Target.createTarget", {
+      url,
+      newWindow: true,
+    });
+
+    const targetId = res.targetId;
     await this.switchTab(targetId);
-    return { targetId };
+
+    let windowId: number | undefined;
+    try {
+      const winInfo = await this.connection.send<{ windowId: number }>("Browser.getWindowForTarget", {
+        targetId,
+      });
+      windowId = winInfo.windowId;
+    } catch {}
+
+    return { targetId, windowId };
+  }
+
+  /**
+   * Activate a specific browser window by windowId
+   */
+  public async activateWindow(windowId: number): Promise<void> {
+    const windows = await this.listWindows();
+    const targetWin = windows.find((w) => w.windowId === windowId);
+    if (!targetWin || targetWin.targetIds.length === 0) {
+      throw new Error(`Window ${windowId} not found`);
+    }
+
+    try {
+      await this.connection.send("Browser.setWindowBounds", {
+        windowId,
+        bounds: { windowState: "normal" },
+      });
+    } catch {}
+
+    const targetIdToActivate = targetWin.activeTargetId || targetWin.targetIds[0];
+    await this.switchTab(targetIdToActivate);
+  }
+
+  /**
+   * Close an entire browser window and all its contained tabs
+   */
+  public async closeWindow(windowId: number): Promise<boolean> {
+    const windows = await this.listWindows();
+    const targetWin = windows.find((w) => w.windowId === windowId);
+    if (!targetWin) {
+      throw new Error(`Window ${windowId} not found`);
+    }
+
+    let allClosed = true;
+    for (const targetId of targetWin.targetIds) {
+      const closed = await this.closeTab(targetId);
+      if (!closed) allClosed = false;
+    }
+
+    return allClosed;
   }
 }

@@ -2,35 +2,36 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Interactive Controls</title>
+  <title>Interactive Controls & Tests</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      padding: 30px;
+      padding: 15px;
       background: #f1f5f9;
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 20px;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
     }
     .card {
       background: white;
-      padding: 20px;
+      padding: 12px;
       border-radius: 8px;
       box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+      font-size: 13px;
     }
     .scroll-box {
       width: 100%;
-      height: 150px;
+      height: 120px;
       overflow-y: scroll;
       border: 1px solid #cbd5e1;
-      padding: 10px;
+      padding: 6px;
       background: #fafafa;
     }
     .scroll-content {
-      height: 600px;
+      height: 400px;
     }
     .dropdown {
       position: relative;
@@ -39,23 +40,24 @@
     .dropbtn {
       background: #2563eb;
       color: white;
-      padding: 10px 16px;
+      padding: 6px 12px;
       border: none;
-      border-radius: 6px;
+      border-radius: 4px;
       cursor: pointer;
+      font-size: 13px;
     }
     .dropdown-content {
       display: none;
       position: absolute;
       background: white;
-      min-width: 160px;
+      min-width: 140px;
       box-shadow: 0 8px 16px rgba(0,0,0,0.15);
-      border-radius: 6px;
+      border-radius: 4px;
       z-index: 10;
     }
     .dropdown-content a {
       color: #334155;
-      padding: 10px 14px;
+      padding: 6px 10px;
       text-decoration: none;
       display: block;
     }
@@ -66,37 +68,48 @@
     .dropdown:hover .dropdown-content {
       display: block;
     }
-    input[type="text"] {
+    input[type="text"], textarea {
       width: 100%;
-      padding: 10px;
+      padding: 6px;
       border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      font-size: 15px;
-      margin-top: 8px;
+      border-radius: 4px;
+      font-size: 13px;
+      margin-top: 4px;
     }
     [contenteditable="true"] {
-      min-height: 80px;
+      min-height: 40px;
       border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      padding: 10px;
+      border-radius: 4px;
+      padding: 6px;
       background: white;
-      margin-top: 8px;
+      margin-top: 4px;
+    }
+    .list-item {
+      padding: 6px 10px;
+      margin: 3px 0;
+      background: #e2e8f0;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .list-item.selected {
+      background: #3b82f6;
+      color: white;
     }
   </style>
 </head>
 <body>
-  <h1 style="margin-bottom: 20px;">Interactive Test Page</h1>
+  <h2 style="margin-bottom: 10px;">Interactive Test Page</h2>
 
   <div class="grid">
-    <!-- Card 1: Buttons & Clicks -->
+    <!-- Card 1: Buttons, Hover & Modifier Clicks -->
     <div class="card">
-      <h2>Mouse Clicks & Hover</h2>
-      <button id="test-btn" class="dropbtn" style="margin: 10px 0;">Click Me</button>
+      <h3>Mouse & Modifiers</h3>
+      <button id="test-btn" class="dropbtn" style="margin: 6px 0;">Click Me</button>
       <div id="btn-count">Button clicks: 0</div>
       <div id="btn-dbl">Double clicks: 0</div>
       <div id="btn-right">Right clicks: 0</div>
 
-      <div class="dropdown" style="margin-top: 15px;">
+      <div class="dropdown" style="margin-top: 8px;">
         <button id="hover-menu-btn" class="dropbtn">Hover Menu ▾</button>
         <div id="dropdown-menu" class="dropdown-content">
           <a href="#" id="menu-item-1">Item Alpha</a>
@@ -104,37 +117,52 @@
           <a href="#" id="menu-item-3">Item Gamma</a>
         </div>
       </div>
-      <div id="hover-selection" style="margin-top: 8px;">Selected: none</div>
+      <div id="hover-selection" style="margin-top: 4px;">Selected: none</div>
+
+      <h4 style="margin-top: 8px;">Modifier Targets</h4>
+      <div id="mod-item-1" class="list-item">Modifier Item 1</div>
+      <div id="mod-item-2" class="list-item">Modifier Item 2</div>
+      <div id="last-click-modifiers">Modifiers: none</div>
     </div>
 
     <!-- Card 2: Nested Scroll Container -->
     <div class="card">
-      <h2>Nested Scrollable Area</h2>
+      <h3>Nested Scroll</h3>
       <div id="nested-scroll" class="scroll-box">
         <div class="scroll-content">
-          <p>Top of scroll container</p>
-          <div style="margin-top: 200px;" id="mid-item">Middle Item Marker (scrollY ~200)</div>
-          <div style="margin-top: 300px;" id="bot-item">Bottom Item Marker (scrollY ~500)</div>
+          <p>Top of scroll</p>
+          <div style="margin-top: 150px;" id="mid-item">Middle (scrollY ~150)</div>
+          <div style="margin-top: 200px;" id="bot-item">Bottom (scrollY ~350)</div>
         </div>
       </div>
-      <div id="scroll-pos" style="margin-top: 10px;">Scroll Top: 0px</div>
+      <div id="scroll-pos" style="margin-top: 6px;">Scroll Top: 0px</div>
     </div>
 
-    <!-- Card 3: Inputs & Typing -->
+    <!-- Card 3: Inputs, Textareas & Copy/Paste -->
     <div class="card">
-      <h2>Text Inputs & Shortcuts</h2>
-      <input type="text" id="text-input" placeholder="Type here..." />
-      <div style="margin-top: 10px;">
-        <label>Contenteditable Div:</label>
-        <div id="editor" contenteditable="true">Editable text area</div>
-      </div>
+      <h3>Inputs & Shortcuts</h3>
+      <label>Input A:</label>
+      <input type="text" id="input-a" value="SourceClipboardText" />
+
+      <label style="margin-top: 4px; display: block;">Input B:</label>
+      <input type="text" id="input-b" placeholder="Paste here..." />
+
+      <label style="margin-top: 4px; display: block;">Contenteditable:</label>
+      <div id="editor" contenteditable="true">Initial editable content</div>
     </div>
 
-    <!-- Card 4: Keyboard Event Logger -->
+    <!-- Card 4: Dialogs & Keyboard Logger -->
     <div class="card">
-      <h2>Key Combo Logger</h2>
-      <div id="key-log" style="font-family: monospace; font-size: 13px; color: #475569; min-height: 100px;">
-        No keys logged yet
+      <h3>Dialogs & Keys</h3>
+      <button id="trigger-alert" class="dropbtn" style="background: #0284c7; margin: 2px;">Alert</button>
+      <button id="trigger-confirm" class="dropbtn" style="background: #0284c7; margin: 2px;">Confirm</button>
+      <button id="trigger-prompt" class="dropbtn" style="background: #0284c7; margin: 2px;">Prompt</button>
+
+      <div id="dialog-result" style="margin-top: 6px; font-weight: bold;">Dialog: none</div>
+
+      <h4 style="margin-top: 8px;">Key Logger</h4>
+      <div id="key-log" style="font-family: monospace; font-size: 11px; color: #475569; min-height: 40px;">
+        No keys logged
       </div>
     </div>
   </div>
@@ -146,8 +174,11 @@
       rightClicks: 0,
       hoverSelected: null,
       scrollPosition: 0,
-      inputValue: "",
-      editorValue: "",
+      lastClickShift: false,
+      lastClickMeta: false,
+      lastClickCtrl: false,
+      lastClickAlt: false,
+      dialogResult: null,
       lastKeys: []
     };
 
@@ -166,6 +197,19 @@
       document.getElementById('btn-right').innerText = `Right clicks: ${window.__STATE__.rightClicks}`;
     });
 
+    ['mod-item-1', 'mod-item-2'].forEach(id => {
+      const el = document.getElementById(id);
+      el.addEventListener('click', (e) => {
+        window.__STATE__.lastClickShift = e.shiftKey;
+        window.__STATE__.lastClickMeta = e.metaKey;
+        window.__STATE__.lastClickCtrl = e.ctrlKey;
+        window.__STATE__.lastClickAlt = e.altKey;
+        el.classList.toggle('selected');
+        document.getElementById('last-click-modifiers').innerText =
+          `Shift: ${e.shiftKey}, Meta: ${e.metaKey}, Ctrl: ${e.ctrlKey}, Alt: ${e.altKey}`;
+      });
+    });
+
     ['menu-item-1', 'menu-item-2', 'menu-item-3'].forEach(id => {
       document.getElementById(id).addEventListener('click', (e) => {
         e.preventDefault();
@@ -180,20 +224,28 @@
       document.getElementById('scroll-pos').innerText = `Scroll Top: ${Math.round(scrollBox.scrollTop)}px`;
     });
 
-    const textInput = document.getElementById('text-input');
-    textInput.addEventListener('input', () => {
-      window.__STATE__.inputValue = textInput.value;
+    document.getElementById('trigger-alert').addEventListener('click', () => {
+      alert('Alert Test Message');
+      window.__STATE__.dialogResult = 'alert_dismissed';
+      document.getElementById('dialog-result').innerText = 'Dialog: alert_dismissed';
     });
 
-    const editor = document.getElementById('editor');
-    editor.addEventListener('input', () => {
-      window.__STATE__.editorValue = editor.innerText;
+    document.getElementById('trigger-confirm').addEventListener('click', () => {
+      const res = confirm('Do you confirm this action?');
+      window.__STATE__.dialogResult = res ? 'confirm_true' : 'confirm_false';
+      document.getElementById('dialog-result').innerText = `Dialog: ${window.__STATE__.dialogResult}`;
+    });
+
+    document.getElementById('trigger-prompt').addEventListener('click', () => {
+      const res = prompt('Enter your favorite color:', 'Blue');
+      window.__STATE__.dialogResult = res !== null ? `prompt_${res}` : 'prompt_cancelled';
+      document.getElementById('dialog-result').innerText = `Dialog: ${window.__STATE__.dialogResult}`;
     });
 
     window.addEventListener('keydown', (e) => {
       const entry = `${e.metaKey ? 'Meta+' : ''}${e.ctrlKey ? 'Ctrl+' : ''}${e.shiftKey ? 'Shift+' : ''}${e.altKey ? 'Alt+' : ''}${e.key}`;
       window.__STATE__.lastKeys.push(entry);
-      document.getElementById('key-log').innerText = window.__STATE__.lastKeys.slice(-8).join('\n');
+      document.getElementById('key-log').innerText = window.__STATE__.lastKeys.slice(-4).join('\n');
     });
   </script>
 </body>

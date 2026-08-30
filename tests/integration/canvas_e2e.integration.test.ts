@@ -28,7 +28,7 @@ describe("Live Chrome Canvas E2E — 100% Selectorless Computer-Use Verification
     await controller.navigationController.navigate(`${server.url}/canvas_ui.html`);
     await new Promise((r) => setTimeout(r, 200));
 
-    // Get bounding rect of the canvas via Runtime assertion to find canvas viewport offset
+    // Get canvas offset in viewport
     const canvasRect = await controller.session.send<{ result: { value: { left: number; top: number } } }>(
       "Runtime.evaluate",
       {
@@ -39,11 +39,11 @@ describe("Live Chrome Canvas E2E — 100% Selectorless Computer-Use Verification
     const offsetX = canvasRect.result.value.left;
     const offsetY = canvasRect.result.value.top;
 
-    // 1. Initial Observation
+    // 1. Initial Observation (obs1)
     const obs1 = await controller.observe();
     expect(obs1.observationId).toBeTruthy();
 
-    // 2. Click Canvas Button (UI.button is at relative x: 100..240, y: 80..124 -> center at +170, +102)
+    // 2. Click Canvas Button (UI.button center at +170, +102)
     const buttonClick = await controller.executeComputerAction({
       type: "click",
       observationId: obs1.observationId,
@@ -53,27 +53,33 @@ describe("Live Chrome Canvas E2E — 100% Selectorless Computer-Use Verification
     });
     expect(buttonClick.success).toBe(true);
 
-    // 3. Hover Canvas Menu (UI.menu is at relative x: 100..280, y: 240..280 -> center at +190, +260)
+    // 3. New Observation after click (obs2) & Hover Canvas Menu
+    const obs2 = await controller.observe();
     const menuHover = await controller.executeComputerAction({
       type: "move",
+      observationId: obs2.observationId,
       x: offsetX + 190,
       y: offsetY + 260,
     });
     expect(menuHover.success).toBe(true);
     await new Promise((r) => setTimeout(r, 50));
 
-    // 4. Click Dropdown Option 1 (y: 280..312 -> center at +190, +296)
+    // 4. New Observation after move (obs3) & Click Dropdown Option 1 (+190, +296)
+    const obs3 = await controller.observe();
     const menuSelect = await controller.executeComputerAction({
       type: "click",
+      observationId: obs3.observationId,
       x: offsetX + 190,
       y: offsetY + 296,
       button: "left",
     });
     expect(menuSelect.success).toBe(true);
 
-    // 5. Focus Canvas Fake Input Box (UI.input is at relative x: 100..360, y: 160..204 -> center at +200, +182)
+    // 5. New Observation (obs4) & Focus Canvas Fake Input Box (+200, +182)
+    const obs4 = await controller.observe();
     const inputFocus = await controller.executeComputerAction({
       type: "click",
+      observationId: obs4.observationId,
       x: offsetX + 200,
       y: offsetY + 182,
       button: "left",
@@ -87,11 +93,11 @@ describe("Live Chrome Canvas E2E — 100% Selectorless Computer-Use Verification
     });
     expect(focusEval.result.value).toBe(true);
 
-    // 6. Type text into custom canvas listener using key_events method
+    // 6. Type text into custom canvas listener using default "auto" method
     const typeRes = await controller.executeComputerAction({
       type: "type",
       text: "CanvasText",
-      method: "key_events",
+      method: "auto",
     });
     expect(typeRes.success).toBe(true);
 
@@ -102,9 +108,11 @@ describe("Live Chrome Canvas E2E — 100% Selectorless Computer-Use Verification
     });
     expect(backspaceRes.success).toBe(true);
 
-    // 8. Drag Canvas Slider Handle from x:500 to x:650 (track y: 100 -> center at +500, +105 to +650, +105)
+    // 8. New Observation (obs5) & Drag Canvas Slider Handle from x:500 to x:650
+    const obs5 = await controller.observe();
     const dragRes = await controller.executeComputerAction({
       type: "drag",
+      observationId: obs5.observationId,
       path: [
         { x: offsetX + 500, y: offsetY + 105 },
         { x: offsetX + 550, y: offsetY + 105 },
