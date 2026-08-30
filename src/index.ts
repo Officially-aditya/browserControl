@@ -26,3 +26,68 @@ export { TabController } from "./browser/tabs.js";
 export { NavigationController } from "./browser/navigation.js";
 export * from "./protocol/actions.js";
 export * from "./protocol/results.js";
+
+// Visual Agent Runtime Exports
+export {
+  VisionAgent,
+  VisionAgentConfig,
+  VisionAgentRunOptions,
+  VisionAgentRunResult,
+} from "./agent/runtime.js";
+export {
+  VisionModelAdapter,
+  validateVisionDecision,
+} from "./vision/adapter.js";
+export {
+  CallbackVisionAdapter,
+  CallbackVisionAdapterOptions,
+  VisionDecideFunction,
+} from "./vision/callback-adapter.js";
+export {
+  OpenAIVisionAdapter,
+  OpenAIVisionAdapterConfig,
+} from "./vision/openai-adapter.js";
+export { VisionFrame } from "./vision/frame.js";
+export { VisionFrameMapper } from "./vision/frame-mapper.js";
+export {
+  VisionCaptureService,
+  VisionCaptureConfig,
+} from "./vision/capture.js";
+export {
+  ObservationPlanner,
+  PlannerOptions,
+  PlannerState,
+  PlannerNextStep,
+  PlannerNextActionType,
+} from "./vision/planner.js";
+export {
+  VisualChangeDetector,
+  VisualChange,
+  ChangeDetectorOptions,
+} from "./vision/change-detector.js";
+export {
+  AgentMemory,
+  StepSummary,
+} from "./agent/memory.js";
+export {
+  ActionPolicy,
+  ActionPolicyOptions,
+  PolicyEvaluation,
+  ActionPolicyContext,
+  ActionPolicyHook,
+} from "./agent/policy.js";
+export {
+  AgentMetrics,
+  MetricsCollector,
+} from "./agent/metrics.js";
+export {
+  VisionDecision,
+  VisionRequest,
+  VisionRequestFrame,
+  VisionCapabilities,
+  VisionCertainty,
+  NormalizedRegion,
+  NormalizedCoordinate,
+  NormalizedComputerAction,
+  NormalizedBrowserAction,
+} from "./vision/types.js";

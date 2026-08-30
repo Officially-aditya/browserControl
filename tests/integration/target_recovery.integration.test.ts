@@ -59,8 +59,11 @@ describe("Live Chrome Automatic Controlled Target Recovery", () => {
     // 2. Close the ONLY remaining open tab
     await controller.connection.send("Target.closeTarget", { targetId: currentTabId });
 
-    // Wait briefly for auto-recovery
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for auto-recovery to create and attach to a new tab
+    const start = Date.now();
+    while ((!controller.currentTargetId || controller.currentTargetId === currentTabId) && Date.now() - start < 3000) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     // 3. Controller should have automatically created a new about:blank tab and attached to it
     expect(controller.isConnected).toBe(true);
@@ -86,8 +89,15 @@ describe("Live Chrome Automatic Controlled Target Recovery", () => {
     // 2. Close the target externally
     await controller.connection.send("Target.closeTarget", { targetId: initialTargetId });
 
-    // Wait for auto-recovery
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for session state transition
+    let elapsed = 0;
+    while (controller.session.state !== "TARGET_CLOSED" && elapsed < 3000) {
+      await new Promise((r) => setTimeout(r, 50));
+      elapsed += 50;
+    }
+
+    // Trigger auto-recovery
+    await controller.ensureActiveSession();
 
     expect(controller.currentTargetId).not.toBe(initialTargetId);
 

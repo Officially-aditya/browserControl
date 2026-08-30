@@ -25,6 +25,7 @@ describe("Live Chrome Browser-Level Operations & Window/Dialog Subsystem", () =>
   });
 
   beforeEach(async () => {
+    await controller.ensureActiveSession();
     await controller.resetInputState();
     await controller.navigationController.navigate(`${server.url}/interactive.html`);
     await new Promise((r) => setTimeout(r, 100));
