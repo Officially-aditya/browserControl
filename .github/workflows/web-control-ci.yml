@@ -31,6 +31,13 @@ jobs:
           node --check extension/popup.js
       - run: npm run build
       - run: npm run test:web
+      - name: Install Chrome for Testing
+        run: |
+          npx --yes @puppeteer/browsers install chrome@stable --path /tmp/browsercontrol-cft
+          CHROME_PATH=$(find /tmp/browsercontrol-cft -type f -path '*/chrome-linux64/chrome' -print -quit)
+          test -n "$CHROME_PATH"
+          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+          "$CHROME_PATH" --version
       - name: Generate throwaway localhost TLS certificate
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes \
