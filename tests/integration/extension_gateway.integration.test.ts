@@ -73,7 +73,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
 
   beforeAll(async () => {
     gateway = await runGatewayRuntime({
-      host: "127.0.0.1",
+      host: "localhost",
       port: 8787,
       extensionToken: "",
       mcpBearerToken: "extension-canary-token",
@@ -113,7 +113,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
 
     const probe = await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
       expression: `new Promise((resolve) => {
-        const probeSocket = new WebSocket("ws://127.0.0.1:8787/extension");
+        const probeSocket = new WebSocket("ws://localhost:8787/extension");
         const timer = setTimeout(() => resolve({ok:false, timeout:true, readyState:probeSocket.readyState}), 3000);
         probeSocket.onopen = () => { clearTimeout(timer); probeSocket.close(1000, "probe"); resolve({ok:true}); };
         probeSocket.onerror = () => { clearTimeout(timer); resolve({ok:false, error:true, readyState:probeSocket.readyState}); };
@@ -126,7 +126,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     }
 
     await sendCdp(popup.webSocketDebuggerUrl, "Runtime.evaluate", {
-      expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"ws://127.0.0.1:8787/extension",deviceToken:"",autoReconnect:true}})`,
+      expression: `chrome.runtime.sendMessage({type:"saveConfig",config:{gatewayUrl:"ws://localhost:8787/extension",deviceToken:"",autoReconnect:true}})`,
       awaitPromise: true,
       returnByValue: true,
     });
@@ -134,7 +134,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     const connectDeadline = Date.now() + 8000;
     let extensionConnected = false;
     while (Date.now() < connectDeadline) {
-      const health = await fetch("http://127.0.0.1:8787/health").then((r) => r.json()) as any;
+      const health = await fetch("http://localhost:8787/health").then((r) => r.json()) as any;
       if (health.extensionConnected) {
         extensionConnected = true;
         break;
@@ -154,7 +154,7 @@ describe("Real Chrome extension -> gateway -> MCP canary", () => {
     await sendCdp(chrome.wsUrl, "Target.closeTarget", { targetId: popupCreated.targetId });
 
     client = new Client({ name: "extension-canary", version: "1.0.0" });
-    transport = new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8787/mcp"), {
+    transport = new StreamableHTTPClientTransport(new URL("http://localhost:8787/mcp"), {
       requestInit: { headers: { Authorization: "Bearer extension-canary-token" } },
     });
     await client.connect(transport);
