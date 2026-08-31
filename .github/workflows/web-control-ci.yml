@@ -42,7 +42,8 @@ jobs:
           node --check extension/gateway-connection.js
           if [ -f extension/keyboard.js ]; then node --check extension/keyboard.js; fi
       - run: npm run build
-      - run: npm run test:unit
+      - name: Core tests
+        run: npm run test:unit -- --maxWorkers=2
       - run: npm run test:web
       - name: Extension unit tests
         run: npx vitest run tests/extension
