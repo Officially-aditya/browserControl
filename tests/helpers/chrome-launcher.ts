@@ -35,6 +35,10 @@ export async function launchRealChrome(options: {
   const headless = options.headless ?? true;
   const disableBackgroundNetworking = options.disableBackgroundNetworking ?? true;
   const ciSandboxWorkaround = process.env.BROWSERCONTROL_CHROME_CI_NO_SANDBOX === "1";
+  const configuredStartupTimeout = Number(process.env.BROWSERCONTROL_CHROME_STARTUP_TIMEOUT_MS);
+  const startupTimeoutMs = Number.isFinite(configuredStartupTimeout) && configuredStartupTimeout > 0
+    ? Math.max(5_000, configuredStartupTimeout)
+    : 15_000;
 
   const args = [
     "--remote-debugging-port=0",
@@ -73,7 +77,7 @@ export async function launchRealChrome(options: {
   let port = 0;
   let wsPath = "";
 
-  while (Date.now() - startTime < 15000) {
+  while (Date.now() - startTime < startupTimeoutMs) {
     if (exitCode !== null) break;
     try {
       const content = await fs.readFile(activePortFile, "utf8");
@@ -93,7 +97,7 @@ export async function launchRealChrome(options: {
     try { proc.kill("SIGKILL"); } catch {}
     await fs.rm(tempDir, { recursive: true, force: true });
     throw new Error(
-      `Timed out waiting for Chrome DevToolsActivePort (path=${chromePath}, exitCode=${exitCode ?? "running"})` +
+      `Timed out after ${startupTimeoutMs}ms waiting for Chrome DevToolsActivePort (path=${chromePath}, exitCode=${exitCode ?? "running"})` +
       `${stderr ? `\nstderr:\n${stderr}` : ""}` +
       `${stdout ? `\nstdout:\n${stdout}` : ""}`
     );
