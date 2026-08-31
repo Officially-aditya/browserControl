@@ -18,9 +18,20 @@ jobs:
   web-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 10
     env:
       BROWSERCONTROL_CHROME_CI_NO_SANDBOX: "1"
       BROWSERCONTROL_CHROME_STARTUP_TIMEOUT_MS: "30000"
+      BROWSERCONTROL_TEST_REDIS_URL: redis://127.0.0.1:6379/15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
