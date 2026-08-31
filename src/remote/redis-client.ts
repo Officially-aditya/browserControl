@@ -74,7 +74,7 @@ export interface RedisClientOptions {
 export class RedisClient {
   private socket: net.Socket | tls.TLSSocket | null = null;
   private connecting: Promise<void> | null = null;
-  private incoming = Buffer.alloc(0);
+  private incoming: Buffer = Buffer.alloc(0);
   private readonly pending: PendingCommand[] = [];
   private closed = false;
   private readonly url: URL;
