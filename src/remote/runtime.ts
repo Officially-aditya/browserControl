@@ -95,6 +95,10 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
   const configuredMcpToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
   const configuredAdminToken = options.adminBearerToken ?? process.env.BROWSERCONTROL_ADMIN_TOKEN ?? "";
   const configuredDeviceToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
+  const redisUrl = options.redisUrl ?? process.env.BROWSERCONTROL_REDIS_URL ?? "";
+  const configuredInternalUrl = options.relayInternalUrl ?? process.env.BROWSERCONTROL_RELAY_INTERNAL_URL ?? "";
+  const clusterToken = options.clusterToken ?? process.env.BROWSERCONTROL_RELAY_CLUSTER_TOKEN ?? "";
+  const clustered = !!redisUrl || (!!options.relayState && !!clusterToken);
 
   if (!localPublicListener && !configuredAdminToken) {
     throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the TLS relay is publicly bound");
@@ -105,11 +109,17 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
   if (!localPublicListener && configuredMcpToken) {
     throw new Error("BROWSERCONTROL_MCP_TOKEN is only supported for loopback development; public TLS relays use device-scoped MCP credentials from pairing");
   }
+  if (clustered && !clusterToken) {
+    throw new Error("BROWSERCONTROL_RELAY_CLUSTER_TOKEN is required for horizontally scaled TLS relays");
+  }
+  if (clustered && !localPublicListener && !configuredInternalUrl) {
+    throw new Error("BROWSERCONTROL_RELAY_INTERNAL_URL is required for horizontally scaled public TLS relays");
+  }
 
-  // Keep the routed MCP/WebSocket relay on a private ephemeral loopback port and
-  // put a transparent TLS terminator in front. Explicitly carry the public
-  // listener's trust mode into the private hop so 127.0.0.1 cannot accidentally
-  // reactivate tokenless/static localhost development credentials.
+  // Keep browser-facing state on a private loopback server and place the TLS
+  // terminator in front. For clustered deployments the advertised internal URL
+  // still points at a per-replica address reachable by peer relays (normally the
+  // replica's private HTTPS endpoint), never at this process-local loopback hop.
   const internalGateway = await runRemoteGateway({
     ...options,
     mcpBearerToken: localPublicListener ? configuredMcpToken : "",
