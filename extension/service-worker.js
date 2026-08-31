@@ -1,4 +1,4 @@
-import { getLoopbackHealthUrl, getReconnectDelay } from "./gateway-connection.js";
+import { getGatewayPermissionOrigin, getLoopbackHealthUrl, getReconnectDelay } from "./gateway-connection.js";
 import { keyEvents } from "./keyboard.js";
 
 const DEBUGGER_VERSION = "1.3";
@@ -445,7 +445,11 @@ async function connectGateway() {
     }
 
     const healthUrl = getLoopbackHealthUrl(config.gatewayUrl);
-    if (healthUrl) {
+    const permissionOrigin = getGatewayPermissionOrigin(config.gatewayUrl);
+    const mayProbeHealth = healthUrl && permissionOrigin
+      ? await chrome.permissions.contains({ origins: [permissionOrigin] })
+      : false;
+    if (healthUrl && mayProbeHealth) {
       const probeController = new AbortController();
       const probeTimer = setTimeout(() => probeController.abort(), 1500);
       try {
