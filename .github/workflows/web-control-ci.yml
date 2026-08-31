@@ -3,21 +3,21 @@ name: Web Control Pipeline CI
 on:
   push:
     branches:
-      - feature/web-control-pipeline
+      - main
+      - fix/release-hardening
   pull_request:
     paths:
       - 'src/**'
       - 'extension/**'
-      - 'tests/remote/**'
-      - 'tests/integration/extension_gateway.integration.test.ts'
-      - 'tests/helpers/chrome-launcher.ts'
+      - 'tests/**'
       - 'package*.json'
       - 'tsconfig.json'
+      - '.github/workflows/web-control-ci.yml'
 
 jobs:
   web-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,8 +29,13 @@ jobs:
         run: |
           node --check extension/service-worker.js
           node --check extension/popup.js
+          node --check extension/gateway-connection.js
+          if [ -f extension/keyboard.js ]; then node --check extension/keyboard.js; fi
       - run: npm run build
+      - run: npm run test:unit
       - run: npm run test:web
+      - name: Extension unit tests
+        run: npx vitest run tests/extension
       - name: Install Chrome for Testing
         run: |
           npx --yes @puppeteer/browsers install chrome@stable --path /tmp/browsercontrol-cft
