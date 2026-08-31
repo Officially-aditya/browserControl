@@ -18,13 +18,23 @@ jobs:
   web-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      BROWSERCONTROL_CHROME_CI_NO_SANDBOX: "1"
+      BROWSERCONTROL_CHROME_STARTUP_TIMEOUT_MS: "30000"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install Chrome for Testing
+        run: |
+          npx --yes @puppeteer/browsers install chrome@stable --path /tmp/browsercontrol-cft
+          CHROME_PATH=$(find /tmp/browsercontrol-cft -type f -path '*/chrome-linux64/chrome' -print -quit)
+          test -n "$CHROME_PATH"
+          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+          "$CHROME_PATH" --version
       - name: Validate extension JavaScript
         run: |
           node --check extension/service-worker.js
@@ -36,13 +46,6 @@ jobs:
       - run: npm run test:web
       - name: Extension unit tests
         run: npx vitest run tests/extension
-      - name: Install Chrome for Testing
-        run: |
-          npx --yes @puppeteer/browsers install chrome@stable --path /tmp/browsercontrol-cft
-          CHROME_PATH=$(find /tmp/browsercontrol-cft -type f -path '*/chrome-linux64/chrome' -print -quit)
-          test -n "$CHROME_PATH"
-          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
-          "$CHROME_PATH" --version
       - name: Generate throwaway localhost TLS certificate
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes \
@@ -60,6 +63,5 @@ jobs:
         env:
           BROWSERCONTROL_TEST_TLS_KEY: /tmp/browsercontrol-test-key.pem
           BROWSERCONTROL_TEST_TLS_CERT: /tmp/browsercontrol-test-cert.pem
-          BROWSERCONTROL_CHROME_CI_NO_SANDBOX: "1"
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: xvfb-run -a npx vitest run tests/integration/extension_gateway.integration.test.ts
