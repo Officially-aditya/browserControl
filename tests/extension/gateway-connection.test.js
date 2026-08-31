@@ -22,9 +22,9 @@ describe("extension gateway connection helpers", () => {
     expect(() => getGatewayHttpUrl("ws://gateway.example.com/extension")).toThrow(/secure wss/);
   });
 
-  it("builds exact optional permission origins", () => {
+  it("builds valid port-agnostic optional permission origins", () => {
     expect(getGatewayPermissionOrigin("wss://gateway.example.com/extension")).toBe("https://gateway.example.com/*");
-    expect(getGatewayPermissionOrigin("ws://localhost:8787/extension")).toBe("http://localhost:8787/*");
+    expect(getGatewayPermissionOrigin("ws://localhost:8787/extension")).toBe("http://localhost/*");
     expect(getGatewayPermissionOrigin("not a url")).toBeNull();
   });
 
