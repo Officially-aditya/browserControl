@@ -14,17 +14,18 @@ New screenshot
 Repeat
 ```
 
-The repository supports two complementary paths: the original Node/raw-CDP controller for local agents, and an extension-first remote gateway that gives compatible web AI clients an authenticated screen/mouse/keyboard connection to Chrome without adding a second reasoning model.
+The repository supports two complementary paths: the original Node/raw-CDP controller for local agents, and an extension-first routed relay that gives compatible web AI clients an authenticated screen/mouse/keyboard connection to Chrome without adding a second reasoning model.
 
 ## Core Principles & Guarantees
 
-- **100% Selectorless**: Interacts purely with viewport pixels, normalized coordinates, and keyboard strokes. No DOM/CSS selectors, no Playwright/Puppeteer abstractions, no accessibility refs.
+- **100% Selectorless**: Interacts through viewport pixels, normalized coordinates, and keyboard strokes. No DOM/CSS selectors, Playwright/Puppeteer abstractions, or accessibility refs are required for correctness.
 - **Connects to Existing Chrome**: Re-uses the user's running Chrome session, cookies, logins, profile, and tabs via Chrome remote debugging or the browserControl MV3 extension.
-- **Direct CDP Transport**: Pure Chrome DevTools Protocol interaction with no heavy automation wrapper.
-- **Deterministic Coordinate Normalization**: Encoded screenshots are decoded at the binary header level to determine real dimensions and scale factors, preserving accurate mapping across DPR and zoom levels.
-- **Observation Guardrails**: Screenshots yield an `observationId` and `visualEpoch`. The extension path also invalidates observations on external DOM/user visual changes, and every mutating remote MCP tool is observation-bound.
-- **Action Serialization & Cancellation**: Local controller actions are queued serially per target (`ActionQueue`) with cancel-and-drain semantics and AbortSignal propagation.
-- **Dual MCP Paths**: Standard Stdio/HTTP transports for local raw-CDP agents plus the hardened extension gateway for remote web clients.
+- **Direct CDP Transport**: Chrome DevTools Protocol interaction with no heavy automation wrapper.
+- **Observation Guardrails**: Screenshots yield an `observationId` and `visualEpoch`. External visual changes invalidate observations, and every mutating remote MCP tool is observation-bound.
+- **Cloud-safe Relay**: Claude/remote AI connects to a public HTTPS MCP relay while the local extension maintains an outbound WSS connection. No AI cloud service is expected to reach the user's localhost.
+- **Device-scoped Routing**: Pairing creates independent extension and MCP credentials. MCP authentication resolves the target device server-side.
+- **Horizontal Relay Routing**: Replicas share Redis control-plane state and forward MCP directly to the replica that owns the device WebSocket, so ordinary load balancing is safe.
+- **Separated Administration**: The admin credential can pair, list, rotate, and revoke devices; the cluster credential is relay-internal; neither is model-facing.
 
 ---
 
@@ -34,7 +35,6 @@ The repository supports two complementary paths: the original Node/raw-CDP contr
 1. **Node.js** (v20+)
 2. **Google Chrome**
 
-### Installation & Build
 ```bash
 npm ci
 npm run build
@@ -44,158 +44,171 @@ npm run build
 
 ## 2. Local raw-CDP connection modes
 
-The Node controller supports 3 connection modes:
+The Node controller supports:
 
-1. **`auto`** (`CHROME_CONNECT_MODE=auto`): discovers an active Chrome debugging session where supported.
-2. **`browser-url`** (`CHROME_BROWSER_URL=http://127.0.0.1:9222`): connects to an explicit HTTP debugging endpoint.
-3. **`ws-endpoint`** (`CHROME_WS_ENDPOINT=ws://...`): connects directly to a Chrome WebSocket debugger URL.
+1. **`auto`** (`CHROME_CONNECT_MODE=auto`) - discovers an active Chrome debugging session where supported.
+2. **`browser-url`** (`CHROME_BROWSER_URL=http://127.0.0.1:9222`) - connects to an explicit HTTP debugging endpoint.
+3. **`ws-endpoint`** (`CHROME_WS_ENDPOINT=ws://...`) - connects directly to a Chrome WebSocket debugger URL.
 
-For explicit remote debugging, enable it in Chrome or launch a dedicated test profile with a debugging port.
-
----
-
-## 3. Diagnostic Doctor
-
-Inspect Chrome connection status, viewport metrics, screenshot dimensions, scale factors, and DPR:
+Run diagnostics with:
 
 ```bash
 npm run doctor
 ```
 
----
-
-## 4. Interactive CLI REPL
-
-Launch the interactive terminal REPL:
+Launch the interactive CLI with:
 
 ```bash
 npm run cli
 ```
 
-### Complete Command Reference
-
-| Command | Arguments | Description |
-| :--- | :--- | :--- |
-| `auto-connect` | — | Auto-discover and connect to running Chrome instance |
-| `connect` | `[port] [host]` | Connect to specific HTTP remote debugging endpoint |
-| `doctor` | — | Run diagnostic check and display viewport/scale metrics |
-| `nav` | `<url>` | Navigate active tab to URL |
-| `back` | — | Navigate back in session history |
-| `forward` | — | Navigate forward in session history |
-| `reload` | — | Reload active tab |
-| `observe` | `[filepath]` | Capture screenshot observation and optionally save image |
-| `click` | `<x> <y> [button]` | Click at coordinates |
-| `dblclick` | `<x> <y> [button]` | Double click at coordinates |
-| `move` | `<x> <y>` | Move mouse cursor |
-| `down` | `<x> <y> [button]` | Press and hold mouse button |
-| `up` | `<x> <y> [button]` | Release held mouse button |
-| `scroll` | `<x> <y> <deltaY> [deltaX]` | Scroll wheel at coordinates |
-| `drag` | `<x1,y1> <x2,y2> ...` | Multi-waypoint drag path |
-| `type` | `<text>` | Insert text into focused element |
-| `keypress` | `<key1> [key2]` | Dispatch shortcut combo (for example `keypress Meta a`) |
-| `keydown` | `<key>` | Press and hold key |
-| `keyup` | `<key>` | Release held key |
-| `reset-input` | — | Emergency release of held keys/buttons |
-| `tabs` | — | List browser tabs |
-| `tab` | `<targetId>` | Switch active controller session |
-| `newtab` | `[url]` | Open a browser tab |
-| `closetab` | `[targetId]` | Close tab |
-| `windows` | — | List browser windows |
-| `newwindow` | `[url]` | Open a browser window |
-| `closewindow` | `<windowId>` | Close a browser window |
-| `dialog` | — | Inspect active JavaScript dialog |
-| `dialog-accept` | `[promptText]` | Accept dialog |
-| `dialog-dismiss` | — | Dismiss dialog |
-| `help` | — | List commands |
-| `exit` / `quit` | — | Disconnect and exit |
-
 ---
 
-## 5. Model Context Protocol (MCP)
+## 3. Model Context Protocol (MCP)
 
-### A. Local agents
-
-Run the local stdio MCP server:
+### Local agents
 
 ```bash
 npm run mcp
-```
-
-Run the hardened local Streamable HTTP server:
-
-```bash
+# or
 npm run mcp:http
 ```
 
-The local HTTP path uses `MCP_AUTH_TOKEN` and retains its existing security controls such as host validation, CORS controls, payload limits, and lazy Chrome reconnect.
+The local stdio/HTTP path remains supported for local raw-CDP agents.
 
-### B. Extension-first remote web control
+### Remote web control: Claude / compatible MCP clients
 
-For Claude web and other compatible remote MCP clients, run/deploy the dedicated gateway:
+A remote web AI runs in its provider's cloud. Therefore the required topology is:
 
-```bash
-npm run gateway:setup
-# load .browsercontrol.env for local development
-npm run gateway
+```text
+User Chrome extension
+       |
+       | outbound WSS
+       v
+public browserControl relay / relay cluster
+       ^
+       | HTTPS MCP, device-scoped token
+       |
+Claude / remote AI cloud
 ```
 
-The remote gateway uses MCP `2026-07-28` with legacy stateless compatibility and exposes screenshot image content plus browser-control tools.
+A public relay does **not** use one global MCP token. Pairing provisions per-device credentials:
 
-#### Credential separation
+- `deviceToken` -> authenticates that extension's WSS connection
+- `mcpToken` -> authenticates the remote MCP connector and routes it to that device
 
-- `BROWSERCONTROL_MCP_TOKEN`: model-facing MCP access.
-- `BROWSERCONTROL_ADMIN_TOKEN`: pairing creation, device listing and revocation. **Never give this token to the AI connector.**
-- `BROWSERCONTROL_DEVICE_TOKEN`: loopback-development compatibility only. Public/non-loopback gateways reject the static device-token path and use revocable pairing instead.
+The relay stores only credential digests.
 
-The Render blueprint follows this model and does not create a permanent production device token.
+#### Public relay environment
 
-#### Pairing and device revocation
+Single replica:
 
-Create an eight-digit, one-time pairing code with the admin credential:
+```text
+BROWSERCONTROL_GATEWAY_HOST=0.0.0.0
+BROWSERCONTROL_ADMIN_TOKEN=<long-random-admin-secret>
+BROWSERCONTROL_TRUST_PROXY=1     # only behind a trusted reverse proxy
+```
+
+Optional single-replica durable pairings:
+
+```text
+BROWSERCONTROL_DEVICE_STORE_PATH=/durable/path/browsercontrol-devices.json
+```
+
+Horizontally scaled replicas instead share Redis and a cluster secret:
+
+```text
+BROWSERCONTROL_REDIS_URL=rediss://...
+BROWSERCONTROL_REDIS_PREFIX=browsercontrol
+BROWSERCONTROL_RELAY_CLUSTER_TOKEN=<shared-cluster-secret>
+BROWSERCONTROL_RELAY_REPLICA_ID=<unique-replica-id>
+BROWSERCONTROL_RELAY_INTERNAL_URL=https://<this-replica-private-origin>
+```
+
+`BROWSERCONTROL_RELAY_INTERNAL_URL` must resolve to that exact replica rather than the public round-robin load balancer. Redis stores only control-plane state; screenshots and browser RPC bodies are forwarded directly between relay processes.
+
+Do **not** configure `BROWSERCONTROL_DEVICE_TOKEN` or `BROWSERCONTROL_MCP_TOKEN` on a public relay. Those are loopback-development compatibility options and are rejected in public mode.
+
+#### Pair a device
+
+Create an eight-digit, single-use pairing code:
 
 ```bash
-curl -X POST https://YOUR_GATEWAY_HOST/pairing/create \
+curl -X POST https://YOUR_RELAY/pairing/create \
   -H "Authorization: Bearer $BROWSERCONTROL_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"Chrome laptop"}'
 ```
 
-Then enter the public `wss://YOUR_GATEWAY_HOST/extension` URL and the code directly in the extension popup and choose **Pair & connect**. The popup requests access only to that configured gateway origin, claims the code, stores the revocable credential, and connects automatically.
+Then in the extension popup:
 
-API-driven claim remains available:
+1. Enter `wss://YOUR_RELAY/extension`.
+2. Enter the pairing code.
+3. Click **Pair & connect**.
+4. Copy the generated **Claude / remote MCP connector URL**.
+5. Add that URL as the remote MCP connector in Claude.
+6. Click **Share active tab** when you want browser control enabled.
 
-```bash
-curl -X POST https://YOUR_GATEWAY_HOST/pairing/claim \
-  -H "Content-Type: application/json" \
-  -d '{"code":"12345678"}'
+The generated connector URL is device-scoped:
+
+```text
+https://YOUR_RELAY/mcp?token=<DEVICE_MCP_TOKEN>
 ```
 
-Pairing claims are rate-limited. Revoking an issued device with the admin API immediately closes its active extension socket and prevents reuse of its credential.
+Treat it like a password. If a client supports custom headers, use `Authorization: Bearer <DEVICE_MCP_TOKEN>` instead of the query form.
+
+#### Admin operations
 
 ```bash
-curl https://YOUR_GATEWAY_HOST/devices \
+# List devices, connection state, and current owner replica
+curl https://YOUR_RELAY/devices \
   -H "Authorization: Bearer $BROWSERCONTROL_ADMIN_TOKEN"
 
-curl -X DELETE https://YOUR_GATEWAY_HOST/devices/DEVICE_ID \
+# Rotate only the device's MCP connector token
+curl -X POST https://YOUR_RELAY/devices/DEVICE_ID/connector/rotate \
+  -H "Authorization: Bearer $BROWSERCONTROL_ADMIN_TOKEN"
+
+# Revoke the device completely
+curl -X DELETE https://YOUR_RELAY/devices/DEVICE_ID \
   -H "Authorization: Bearer $BROWSERCONTROL_ADMIN_TOKEN"
 ```
 
-The current device registry is process-local; use shared persistent storage before deploying multiple gateway replicas.
+Connector rotation leaves the extension connected. Full revocation invalidates both device credentials and asks the owning replica to close that device's WebSocket immediately.
 
-#### Remote visual/action safety
+#### Multi-device and horizontal behavior
 
-- `browser_observe` defaults to a maximum 1280-pixel long edge to reduce image bandwidth/token cost while retaining full CSS-coordinate mapping.
-- `browser_inspect` returns a native-detail crop when additional precision is needed.
-- Every mutating remote MCP tool requires a fresh `observationId`, including typing, keypresses, navigation, history, tab mutations, and dialog handling.
-- DOM mutations and user pointer/keyboard/input/scroll activity invalidate prior observations, so an old action returns `STALE_OBSERVATION`.
-- The extension retains local Pause and Disconnect authority; remote pause/resume is not exposed.
-- Remote interactive clients are serialized through a control lease.
+Each owning relay process maintains a `DeviceRouter` with an independent extension bridge and interactive lease for every locally connected device. A reconnect replaces only the same device's socket.
 
-See [`docs/WEB_CONTROL_PIPELINE.md`](docs/WEB_CONTROL_PIPELINE.md) for the full extension architecture, deployment, pairing and external-client flow.
+With Redis enabled, all replicas share:
+
+- hashed device/MCP credential indexes
+- pairing tickets
+- distributed rate-limit counters
+- TTL-backed device ownership records
+
+An MCP request can hit **any** healthy replica. The entry replica authenticates the device-scoped MCP token, resolves the current WebSocket owner from Redis, and forwards the MCP HTTP request directly to that owner's private relay endpoint using `BROWSERCONTROL_RELAY_CLUSTER_TOKEN`. Payloads do not transit Redis.
+
+If an owner dies, its presence expires automatically and the extension reconnects to another replica. If a device reconnects elsewhere before expiry, the newer connection wins and the old owner stops refreshing its stale connection ID.
 
 ---
 
-## 6. Programmatic TypeScript API
+## 4. Remote visual/action safety
+
+- `browser_observe` defaults to a maximum 1280-pixel long edge to reduce image bandwidth/token cost while retaining CSS-coordinate mapping.
+- `browser_inspect` returns a native-detail crop when additional precision is needed.
+- Every mutating remote MCP tool requires a fresh `observationId`.
+- DOM mutations and user pointer/keyboard/input/scroll activity invalidate prior observations, so old actions return `STALE_OBSERVATION`.
+- The extension retains local Pause and Disconnect authority; remote pause/resume is not exposed.
+- Interactive leases are independent per device and stay consistent because requests for one connected device converge on its owning relay.
+- Screenshots are forwarded in memory and are not intentionally persisted by the relay or Redis.
+
+The previously deferred shared-tab-scope behavior is intentionally unchanged in this release.
+
+See [`docs/WEB_CONTROL_PIPELINE.md`](docs/WEB_CONTROL_PIPELINE.md) for the full relay, pairing, horizontal routing, deployment, and external-client flow.
+
+---
+
+## 5. Programmatic TypeScript API
 
 ```typescript
 import { ChromeController } from "chrome-computer-use";
@@ -204,7 +217,6 @@ const controller = new ChromeController({ mode: "auto" });
 await controller.connect();
 
 const obs = await controller.observe({ showCursor: true });
-
 await controller.executeComputerAction({
   type: "click",
   observationId: obs.observationId,
@@ -213,39 +225,21 @@ await controller.executeComputerAction({
   button: "left",
 });
 
-await controller.executeComputerAction({
-  type: "type",
-  text: "Hello World",
-  method: "auto",
-});
-
-await controller.executeComputerAction({
-  type: "keypress",
-  keys: ["Meta", "A"],
-});
-
+await controller.executeComputerAction({ type: "type", text: "Hello World", method: "auto" });
+await controller.executeComputerAction({ type: "keypress", keys: ["Meta", "A"] });
 await controller.disconnect();
 ```
 
 ---
 
-## 7. Test Suites & Verification
+## 6. Test Suites & Verification
 
 ```bash
-# Core coordinates, inputs, protocol, controller, MCP, CLI, vision and agent tests
 npm run test:unit
-
-# Focused remote gateway/auth tests
 npm run test:web
-
-# Extension helpers and normalized-keyboard tests
 npx vitest run tests/extension
-
-# Live integration tests where their environment prerequisites are available
 npm run test:integration
-
-# Entire Vitest suite
 npm test
 ```
 
-The `Web Control Pipeline CI` workflow gates `main` and the release-hardening branch with deterministic `npm ci`, TypeScript build, the full core unit suite, remote tests, extension tests, and a headed Chrome-for-Testing WSS/MCP canary. The canary exercises the real MV3 service worker and popup, screenshot delivery, scaled overview metadata, an observation-bound click, and rejection of a stale observation after an external DOM mutation.
+The `Web Control Pipeline CI` workflow starts Redis 7, runs deterministic install/build, the core suite, routed-relay tests, extension tests, and a headed Chrome-for-Testing WSS/MCP canary. The remote suite proves simultaneous multi-device isolation plus real two-replica routing: pairing can cross replicas, MCP can enter the non-owning replica, device leases remain consistent across entry replicas, ownership can move after reconnect, and revocation crosses replica boundaries.

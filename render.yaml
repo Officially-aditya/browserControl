@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: browsercontrol-gateway
+    name: browsercontrol-relay
     runtime: docker
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
@@ -8,9 +8,23 @@ services:
     envVars:
       - key: BROWSERCONTROL_GATEWAY_HOST
         value: 0.0.0.0
-      - key: BROWSERCONTROL_MCP_TOKEN
-        generateValue: true
       - key: BROWSERCONTROL_ADMIN_TOKEN
         generateValue: true
       - key: BROWSERCONTROL_TRUST_PROXY
         value: "1"
+      # This blueprint is intentionally a single-replica default.
+      # For restart-persistent pairing on one replica, attach a durable disk and set:
+      # BROWSERCONTROL_DEVICE_STORE_PATH=/var/data/browsercontrol-devices.json
+      #
+      # For horizontal scaling, do NOT share that file. Configure every replica with
+      # the same persistent Redis and cluster secret instead:
+      # BROWSERCONTROL_REDIS_URL=rediss://...
+      # BROWSERCONTROL_REDIS_PREFIX=browsercontrol
+      # BROWSERCONTROL_RELAY_CLUSTER_TOKEN=<shared secret>
+      #
+      # Each replica must additionally receive a unique replica ID and a private
+      # origin that reaches that exact replica rather than this public load balancer:
+      # BROWSERCONTROL_RELAY_REPLICA_ID=<unique instance id>
+      # BROWSERCONTROL_RELAY_INTERNAL_URL=https://<this-replica-private-origin>
+      # Those two values are platform/orchestrator specific and therefore are not
+      # hard-coded into the generic Render blueprint.

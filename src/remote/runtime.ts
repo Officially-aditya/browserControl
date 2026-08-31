@@ -30,7 +30,6 @@ export function installExtensionHeartbeat(
   const lastSeen = new WeakMap<object, number>();
 
   const markAlive = (ws: WebSocket) => lastSeen.set(ws, Date.now());
-
   const onConnection = (ws: WebSocket) => {
     markAlive(ws);
     ws.on("pong", () => markAlive(ws));
@@ -96,32 +95,44 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
   const configuredMcpToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
   const configuredAdminToken = options.adminBearerToken ?? process.env.BROWSERCONTROL_ADMIN_TOKEN ?? "";
   const configuredDeviceToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
+  const redisUrl = options.redisUrl ?? process.env.BROWSERCONTROL_REDIS_URL ?? "";
+  const configuredInternalUrl = options.relayInternalUrl ?? process.env.BROWSERCONTROL_RELAY_INTERNAL_URL ?? "";
+  const clusterToken = options.clusterToken ?? process.env.BROWSERCONTROL_RELAY_CLUSTER_TOKEN ?? "";
+  const clustered = !!redisUrl || (!!options.relayState && !!clusterToken);
 
-  if (!localPublicListener && !configuredMcpToken) {
-    throw new Error("BROWSERCONTROL_MCP_TOKEN is required when the TLS gateway is publicly bound");
-  }
   if (!localPublicListener && !configuredAdminToken) {
-    throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the TLS gateway is publicly bound");
+    throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the TLS relay is publicly bound");
   }
   if (!localPublicListener && configuredDeviceToken) {
-    throw new Error("BROWSERCONTROL_DEVICE_TOKEN is only supported for loopback development; public TLS gateways must use revocable device pairing");
+    throw new Error("BROWSERCONTROL_DEVICE_TOKEN is only supported for loopback development; public TLS relays must use revocable device pairing");
+  }
+  if (!localPublicListener && configuredMcpToken) {
+    throw new Error("BROWSERCONTROL_MCP_TOKEN is only supported for loopback development; public TLS relays use device-scoped MCP credentials from pairing");
+  }
+  if (clustered && !clusterToken) {
+    throw new Error("BROWSERCONTROL_RELAY_CLUSTER_TOKEN is required for horizontally scaled TLS relays");
+  }
+  if (clustered && !localPublicListener && !configuredInternalUrl) {
+    throw new Error("BROWSERCONTROL_RELAY_INTERNAL_URL is required for horizontally scaled public TLS relays");
   }
 
-  // Keep the proven MCP/WebSocket gateway on a private ephemeral loopback port
-  // and put a transparent TLS terminator in front of it. Authentication policy
-  // is validated against the public listener above, not the private loopback hop.
+  // Keep browser-facing state on a private loopback server and place the TLS
+  // terminator in front. For clustered deployments the advertised internal URL
+  // still points at a per-replica address reachable by peer relays (normally the
+  // replica's private HTTPS endpoint), never at this process-local loopback hop.
   const internalGateway = await runRemoteGateway({
     ...options,
-    mcpBearerToken: configuredMcpToken,
+    mcpBearerToken: localPublicListener ? configuredMcpToken : "",
     adminBearerToken: configuredAdminToken,
     extensionToken: localPublicListener ? configuredDeviceToken : "",
+    allowLoopbackDevelopment: localPublicListener,
     host: "127.0.0.1",
     port: 0,
   });
   const internalAddress = internalGateway.httpServer.address();
   if (!internalAddress || typeof internalAddress === "string") {
     await closeServer(internalGateway.httpServer);
-    throw new Error("Could not determine internal browserControl gateway port");
+    throw new Error("Could not determine internal browserControl relay port");
   }
 
   const stopHeartbeat = installExtensionHeartbeat(internalGateway.wss, options);
@@ -157,7 +168,7 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
 
   const address = tlsServer.address();
   const actualPort = typeof address === "object" && address ? address.port : publicPort;
-  console.log(`[browserControl] Secure gateway listening on https://${publicHost}:${actualPort}`);
+  console.log(`[browserControl] Secure routed relay listening on https://${publicHost}:${actualPort}`);
   console.log(`[browserControl] MCP endpoint: https://${publicHost}:${actualPort}/mcp`);
   console.log(`[browserControl] Extension endpoint: wss://${publicHost}:${actualPort}/extension`);
 

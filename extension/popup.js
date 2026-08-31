@@ -1,4 +1,4 @@
-import { getGatewayHttpUrl, getGatewayPermissionOrigin } from "./gateway-connection.js";
+import { getGatewayHttpUrl, getGatewayMcpUrl, getGatewayPermissionOrigin } from "./gateway-connection.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -8,9 +8,9 @@ async function call(message) {
 
 async function requestGatewayPermission(gatewayValue) {
   const origin = getGatewayPermissionOrigin(gatewayValue);
-  if (!origin) throw new Error("Enter a valid ws:// or wss:// gateway URL");
+  if (!origin) throw new Error("Enter a valid ws:// or wss:// relay URL");
   const granted = await chrome.permissions.request({ origins: [origin] });
-  if (!granted) throw new Error("Gateway access was not granted");
+  if (!granted) throw new Error("Relay access was not granted");
 }
 
 function setError(message = "") {
@@ -22,10 +22,17 @@ function setBusy(button, busy, label) {
   if (label) button.textContent = busy ? label : button.dataset.defaultLabel;
 }
 
+function refreshConnector(state) {
+  const connectorUrl = state.mcpToken && state.gatewayUrl ? getGatewayMcpUrl(state.gatewayUrl, state.mcpToken) : "";
+  $("connector").value = connectorUrl;
+  $("connectorSection").hidden = !connectorUrl;
+}
+
 async function refresh() {
   const state = await call({ type: "getStatus" });
   $("gateway").value = state.gatewayUrl || "";
   $("token").value = state.deviceToken || "";
+  refreshConnector(state);
   const connected = state.status === "connected";
   const paused = !!state.paused;
   const status = connected ? "Connected" : state.status === "error" ? "Needs attention" : state.status || "Disconnected";
@@ -44,8 +51,8 @@ $("pair").addEventListener("click", async () => {
   try {
     const gatewayUrl = $("gateway").value.trim();
     const code = $("pairing").value.replace(/\s+/g, "");
-    if (!gatewayUrl) throw new Error("Enter the gateway WebSocket URL");
-    if (!/^\d{6,12}$/.test(code)) throw new Error("Enter the pairing code shown by your gateway");
+    if (!gatewayUrl) throw new Error("Enter the relay WebSocket URL");
+    if (!/^\d{6,12}$/.test(code)) throw new Error("Enter the pairing code shown by your relay");
 
     setBusy(button, true, "Pairing…");
     await requestGatewayPermission(gatewayUrl);
@@ -57,18 +64,25 @@ $("pair").addEventListener("click", async () => {
       body: JSON.stringify({ code }),
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload.deviceToken) {
+    if (!response.ok || !payload.deviceToken || !payload.mcpToken || !payload.deviceId) {
       throw new Error(payload.error || `Pairing failed with HTTP ${response.status}`);
     }
 
     $("token").value = payload.deviceToken;
     const saved = await call({
       type: "saveConfig",
-      config: { gatewayUrl, deviceToken: payload.deviceToken, autoReconnect: true },
+      config: {
+        gatewayUrl,
+        deviceId: payload.deviceId,
+        deviceToken: payload.deviceToken,
+        mcpToken: payload.mcpToken,
+        autoReconnect: true,
+      },
     });
     if (!saved?.ok) throw new Error(saved?.error || "Could not save the paired device");
     $("pairing").value = "";
-    setError("Paired successfully. You can now share a tab.");
+    refreshConnector({ gatewayUrl, mcpToken: payload.mcpToken });
+    setError("Paired. Copy the connector URL into Claude, then share a tab.");
     setTimeout(refresh, 250);
   } catch (error) {
     setError(error?.message || String(error));
@@ -77,12 +91,26 @@ $("pair").addEventListener("click", async () => {
   }
 });
 
+$("copyConnector").addEventListener("click", async () => {
+  setError();
+  const connectorUrl = $("connector").value;
+  if (!connectorUrl) return;
+  try {
+    await navigator.clipboard.writeText(connectorUrl);
+    setError("Connector URL copied. Add it as a remote MCP connector in Claude.");
+  } catch {
+    $("connector").type = "text";
+    $("connector").select();
+    setError("Copy the selected connector URL, then keep it private.");
+  }
+});
+
 $("save").addEventListener("click", async () => {
   const button = $("save");
   setError();
   try {
     const gatewayUrl = $("gateway").value.trim();
-    if (!gatewayUrl) throw new Error("Enter the gateway WebSocket URL");
+    if (!gatewayUrl) throw new Error("Enter the relay WebSocket URL");
     setBusy(button, true, "Connecting…");
     await requestGatewayPermission(gatewayUrl);
     const result = await call({
@@ -93,7 +121,7 @@ $("save").addEventListener("click", async () => {
         autoReconnect: true,
       },
     });
-    if (!result?.ok) throw new Error(result?.error || "Could not save gateway configuration");
+    if (!result?.ok) throw new Error(result?.error || "Could not save relay configuration");
     setTimeout(refresh, 250);
   } catch (error) {
     setError(error?.message || String(error));

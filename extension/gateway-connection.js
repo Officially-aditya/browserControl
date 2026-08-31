@@ -16,6 +16,13 @@ export function getGatewayHttpUrl(gatewayUrl, pathname = "/") {
   return url;
 }
 
+export function getGatewayMcpUrl(gatewayUrl, mcpToken) {
+  if (!mcpToken) return "";
+  const url = getGatewayHttpUrl(gatewayUrl, "/mcp");
+  url.searchParams.set("token", mcpToken);
+  return url.toString();
+}
+
 export function getGatewayPermissionOrigin(gatewayUrl) {
   try {
     const url = getGatewayHttpUrl(gatewayUrl, "/");

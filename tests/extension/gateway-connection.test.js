@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getGatewayHttpUrl,
+  getGatewayMcpUrl,
   getGatewayPermissionOrigin,
   getLoopbackHealthUrl,
   getReconnectDelay,
@@ -20,6 +21,12 @@ describe("extension gateway connection helpers", () => {
     expect(getGatewayHttpUrl("ws://127.0.0.1:8787/extension", "/health").toString())
       .toBe("http://127.0.0.1:8787/health");
     expect(() => getGatewayHttpUrl("ws://gateway.example.com/extension")).toThrow(/secure wss/);
+  });
+
+  it("builds a device-scoped remote MCP connector URL", () => {
+    expect(getGatewayMcpUrl("wss://relay.example.com/extension", "device-mcp-secret"))
+      .toBe("https://relay.example.com/mcp?token=device-mcp-secret");
+    expect(getGatewayMcpUrl("wss://relay.example.com/extension", "")).toBe("");
   });
 
   it("builds valid port-agnostic optional permission origins", () => {
