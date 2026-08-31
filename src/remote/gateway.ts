@@ -219,10 +219,12 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const authorizedAdminRequest = (req: http.IncomingMessage) => safeTokenEqual(bearerToken(req), adminBearerToken);
 
   const authenticateExtensionRequest = (token: string): DeviceIdentity | null => {
-    if (localDevelopment && (!extensionToken || safeTokenEqual(token, extensionToken))) {
+    const pairedDevice = deviceRegistry.authenticateDevice(token);
+    if (pairedDevice) return pairedDevice;
+    if (localDevelopment && ((!extensionToken && !token) || (extensionToken && safeTokenEqual(token, extensionToken)))) {
       return { deviceId: LOCAL_DEVICE_ID, name: "Local development" };
     }
-    return deviceRegistry.authenticateDevice(token);
+    return null;
   };
 
   const authenticateMcpRequest = (req: http.IncomingMessage, url: URL): RoutedMcpPrincipal | null => {
