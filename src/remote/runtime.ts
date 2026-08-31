@@ -107,14 +107,15 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
   }
 
   // Keep the routed MCP/WebSocket relay on a private ephemeral loopback port and
-  // put a transparent TLS terminator in front. The public relay still routes MCP
-  // requests by per-device connector credentials; the private hop is not a
-  // separate trust boundary.
+  // put a transparent TLS terminator in front. Explicitly carry the public
+  // listener's trust mode into the private hop so 127.0.0.1 cannot accidentally
+  // reactivate tokenless/static localhost development credentials.
   const internalGateway = await runRemoteGateway({
     ...options,
     mcpBearerToken: localPublicListener ? configuredMcpToken : "",
     adminBearerToken: configuredAdminToken,
     extensionToken: localPublicListener ? configuredDeviceToken : "",
+    allowLoopbackDevelopment: localPublicListener,
     host: "127.0.0.1",
     port: 0,
   });
