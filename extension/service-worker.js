@@ -1,6 +1,36 @@
 import { getLoopbackHealthUrl, getReconnectDelay } from "./gateway-connection.js";
+import { keyEvents } from "./keyboard.js";
 
 const DEBUGGER_VERSION = "1.3";
+const VISUAL_INVALIDATION_BINDING = "__browserControlVisualInvalidated";
+const VISUAL_HOOK_SCRIPT = `(() => {
+  if (globalThis.__browserControlVisualWatchInstalled) return;
+  globalThis.__browserControlVisualWatchInstalled = true;
+  let timer = null;
+  const notify = () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      try { globalThis.${VISUAL_INVALIDATION_BINDING}("visual-change"); } catch {}
+    }, 50);
+  };
+  const observer = new MutationObserver(notify);
+  const start = () => {
+    if (!document.documentElement) return;
+    observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+  };
+  start();
+  if (!document.documentElement) addEventListener("DOMContentLoaded", start, { once: true });
+  for (const eventName of ["pointerdown", "pointermove", "keydown", "input", "change", "scroll", "resize"]) {
+    addEventListener(eventName, notify, true);
+  }
+})();`;
+
 let socket = null;
 let attachedTabId = null;
 let visualEpoch = 0;
@@ -46,14 +76,28 @@ async function activeTab() {
   return tab;
 }
 
+async function installVisualInvalidationHooks(tabId) {
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.addBinding", { name: VISUAL_INVALIDATION_BINDING });
+  await chrome.debugger.sendCommand({ tabId }, "Page.addScriptToEvaluateOnNewDocument", { source: VISUAL_HOOK_SCRIPT });
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: VISUAL_HOOK_SCRIPT });
+}
+
 async function attach(tabId) {
   if (attachedTabId === tabId) return;
   if (attachedTabId != null) await detach();
   await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   attachedTabId = tabId;
   invalidateVisualState();
-  await chrome.debugger.sendCommand({ tabId }, "Page.enable");
-  await chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Page.enable");
+    await chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
+    await installVisualInvalidationHooks(tabId);
+  } catch (error) {
+    try { await chrome.debugger.detach({ tabId }); } catch {}
+    attachedTabId = null;
+    invalidateVisualState();
+    throw error;
+  }
   await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
 }
 
@@ -103,7 +147,11 @@ function rememberObservation(record) {
 }
 
 function assertFresh(observationId) {
-  if (!observationId) throw new Error("observationId is required for coordinate actions");
+  if (!observationId) {
+    const err = new Error("observationId is required for mutating browser actions");
+    err.code = "OBSERVATION_REQUIRED";
+    throw err;
+  }
   const record = observations.get(String(observationId));
   if (!record || record.tabId !== attachedTabId || record.visualEpoch !== visualEpoch) {
     const err = new Error("STALE_OBSERVATION");
@@ -145,11 +193,21 @@ async function observe(params = {}) {
   const vp = await viewport();
   const format = params.format || "jpeg";
   const quality = params.quality ?? 82;
+  const maxLongEdge = Math.min(2000, Math.max(480, Number(params.maxLongEdge) || 1280));
+  const longEdge = Math.max(vp.width, vp.height);
+  const scale = longEdge > 0 ? Math.min(1, maxLongEdge / longEdge) : 1;
   const shot = await send("Page.captureScreenshot", {
     format,
     ...(format === "png" ? {} : { quality }),
     fromSurface: true,
     captureBeyondViewport: false,
+    clip: {
+      x: vp.pageX,
+      y: vp.pageY,
+      width: vp.width,
+      height: vp.height,
+      scale,
+    },
   });
   const observationId = `${tabId}:${visualEpoch}:${crypto.randomUUID()}`;
   const sourceRegion = { x: 0, y: 0, width: vp.width, height: vp.height };
@@ -162,6 +220,9 @@ async function observe(params = {}) {
     title: tab.title || "",
     viewportWidth: vp.width,
     viewportHeight: vp.height,
+    imageWidth: Math.max(1, Math.round(vp.width * scale)),
+    imageHeight: Math.max(1, Math.round(vp.height * scale)),
+    imageScale: scale,
     sourceRegion,
     kind: "overview",
     coordinateSpace: "normalized_1000",
@@ -196,6 +257,9 @@ async function inspectRegion(params = {}) {
     sourceObservationId: params.observationId,
     visualEpoch,
     targetId: String(attachedTabId),
+    imageWidth: Math.round(region.width),
+    imageHeight: Math.round(region.height),
+    imageScale: 1,
     sourceRegion: region,
     kind: "region",
     coordinateSpace: "normalized_1000",
@@ -247,36 +311,31 @@ async function scroll(params) {
 }
 
 async function typeText(params) {
-  await ensureAttached();
+  assertFresh(params.observationId);
   await send("Input.insertText", { text: String(params.text ?? "") });
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function keypress(params) {
-  await ensureAttached();
-  const keys = Array.isArray(params.keys) ? params.keys : [];
-  if (!keys.length) throw new Error("keys is required");
-  const modifiersMap = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
-  const modifierNames = new Set(Object.keys(modifiersMap));
-  let modifiers = 0;
-  for (const key of keys) if (modifierNames.has(key)) modifiers |= modifiersMap[key];
-  const primary = keys.find((k) => !modifierNames.has(k)) || keys[keys.length - 1];
-  await send("Input.dispatchKeyEvent", { type: "keyDown", key: primary, modifiers });
-  await send("Input.dispatchKeyEvent", { type: "keyUp", key: primary, modifiers });
+  assertFresh(params.observationId);
+  const events = keyEvents(params.keys);
+  await send("Input.dispatchKeyEvent", events.down);
+  await send("Input.dispatchKeyEvent", events.up);
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function navigate(params) {
-  await ensureAttached();
+  assertFresh(params.observationId);
   if (!params.url) throw new Error("url is required");
   await send("Page.navigate", { url: params.url });
   invalidateVisualState();
   return { success: true, visualEpoch, url: params.url };
 }
 
-async function historyAction(direction) {
+async function historyAction(params, direction) {
+  assertFresh(params.observationId);
   const tabId = await ensureAttached();
   if (direction === "back") await chrome.tabs.goBack(tabId);
   else await chrome.tabs.goForward(tabId);
@@ -284,7 +343,8 @@ async function historyAction(direction) {
   return { success: true, visualEpoch };
 }
 
-async function reload() {
+async function reload(params) {
+  assertFresh(params.observationId);
   const tabId = await ensureAttached();
   await chrome.tabs.reload(tabId);
   invalidateVisualState();
@@ -297,7 +357,7 @@ async function listTabs() {
 }
 
 async function switchTab(params) {
-  await ensureAttached();
+  assertFresh(params.observationId);
   const tabId = Number(params.targetId);
   if (!Number.isInteger(tabId)) throw new Error("targetId must be a Chrome tab id");
   await chrome.tabs.update(tabId, { active: true });
@@ -307,7 +367,7 @@ async function switchTab(params) {
 }
 
 async function newTab(params = {}) {
-  await ensureAttached();
+  assertFresh(params.observationId);
   const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
   if (!tab.id) throw new Error("Failed to create tab");
   await attach(tab.id);
@@ -315,7 +375,7 @@ async function newTab(params = {}) {
 }
 
 async function closeTab(params = {}) {
-  await ensureAttached();
+  assertFresh(params.observationId);
   const tabId = params.targetId ? Number(params.targetId) : attachedTabId;
   if (!Number.isInteger(tabId)) throw new Error("No target tab to close");
   await chrome.tabs.remove(tabId);
@@ -327,7 +387,7 @@ async function closeTab(params = {}) {
 }
 
 async function handleDialog(params = {}) {
-  await ensureAttached();
+  assertFresh(params.observationId);
   await send("Page.handleJavaScriptDialog", { accept: !!params.accept, ...(params.promptText != null ? { promptText: String(params.promptText) } : {}) });
   invalidateVisualState();
   return { success: true, visualEpoch };
@@ -339,7 +399,7 @@ async function handleRpc(request) {
   }
   switch (request.method) {
     case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN, manualDisconnect };
-    case "observe": return observe(request.params);
+    case "observe": return observe(request.params || {});
     case "inspect_region": return inspectRegion(request.params || {});
     case "move": return mouseMove(request.params || {});
     case "click": return mouseClick(request.params || {}, 1);
@@ -349,9 +409,9 @@ async function handleRpc(request) {
     case "type": return typeText(request.params || {});
     case "keypress": return keypress(request.params || {});
     case "navigate": return navigate(request.params || {});
-    case "back": return historyAction("back");
-    case "forward": return historyAction("forward");
-    case "reload": return reload();
+    case "back": return historyAction(request.params || {}, "back");
+    case "forward": return historyAction(request.params || {}, "forward");
+    case "reload": return reload(request.params || {});
     case "tabs": return listTabs();
     case "switch_tab": return switchTab(request.params || {});
     case "new_tab": return newTab(request.params || {});
@@ -384,9 +444,6 @@ async function connectGateway() {
       return;
     }
 
-    // A stopped local gateway otherwise produces a noisy browser WebSocket
-    // connection error on every retry. Probe the local health endpoint first;
-    // public WSS endpoints still use the direct WebSocket path.
     const healthUrl = getLoopbackHealthUrl(config.gatewayUrl);
     if (healthUrl) {
       const probeController = new AbortController();
@@ -437,9 +494,15 @@ async function connectGateway() {
       }
     };
 
-    currentSocket.onclose = async () => {
+    currentSocket.onclose = async (event) => {
       if (socket !== currentSocket) return;
       socket = null;
+      const revoked = event.code === 4003;
+      if (revoked) {
+        manualDisconnect = true;
+        await setStatus("error", { lastError: "This device credential was revoked. Pair the extension again." });
+        return;
+      }
       await setStatus("disconnected");
       const latestConfig = await getConfig();
       if (!manualDisconnect && latestConfig.autoReconnect) {
@@ -458,6 +521,7 @@ async function connectGateway() {
 
 async function replaceGatewayConnection() {
   clearReconnectTimer();
+  reconnectAttempts = 0;
   const previousSocket = socket;
   socket = null;
   if (previousSocket && previousSocket.readyState !== WebSocket.CLOSED) {
@@ -466,11 +530,20 @@ async function replaceGatewayConnection() {
   await connectGateway();
 }
 
-chrome.debugger.onEvent.addListener((source, method) => {
+chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== attachedTabId) return;
-  if (["Page.frameNavigated", "Page.navigatedWithinDocument", "Page.loadEventFired", "Page.javascriptDialogOpening"].includes(method)) {
+  if (method === "Runtime.bindingCalled" && params?.name === VISUAL_INVALIDATION_BINDING) {
     invalidateVisualState();
-    setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+    return;
+  }
+  if ([
+    "Page.frameNavigated",
+    "Page.navigatedWithinDocument",
+    "Page.loadEventFired",
+    "Page.javascriptDialogOpening",
+    "Runtime.executionContextsCleared",
+  ].includes(method)) {
+    invalidateVisualState();
   }
 });
 
@@ -478,7 +551,7 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
     invalidateVisualState();
-    setStatus(socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+    void setStatus(socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
   }
 });
 
@@ -519,4 +592,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-connectGateway();
+void connectGateway();
