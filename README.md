@@ -23,8 +23,9 @@ The repository supports two complementary paths: the original Node/raw-CDP contr
 - **Direct CDP Transport**: Chrome DevTools Protocol interaction with no heavy automation wrapper.
 - **Observation Guardrails**: Screenshots yield an `observationId` and `visualEpoch`. External visual changes invalidate observations, and every mutating remote MCP tool is observation-bound.
 - **Cloud-safe Relay**: Claude/remote AI connects to a public HTTPS MCP relay while the local extension maintains an outbound WSS connection. No AI cloud service is expected to reach the user's localhost.
-- **Device-scoped Routing**: Pairing creates independent extension and MCP credentials. MCP authentication resolves the target device server-side, so many users/devices can remain connected to one relay process without cross-routing.
-- **Separated Administration**: The admin credential can pair, list, rotate, and revoke devices; it is never the model-facing credential.
+- **Device-scoped Routing**: Pairing creates independent extension and MCP credentials. MCP authentication resolves the target device server-side.
+- **Horizontal Relay Routing**: Replicas share Redis control-plane state and forward MCP directly to the replica that owns the device WebSocket, so ordinary load balancing is safe.
+- **Separated Administration**: The admin credential can pair, list, rotate, and revoke devices; the cluster credential is relay-internal; neither is model-facing.
 
 ---
 
@@ -84,7 +85,7 @@ User Chrome extension
        |
        | outbound WSS
        v
-public browserControl relay
+public browserControl relay / relay cluster
        ^
        | HTTPS MCP, device-scoped token
        |
@@ -100,17 +101,31 @@ The relay stores only credential digests.
 
 #### Public relay environment
 
+Single replica:
+
 ```text
 BROWSERCONTROL_GATEWAY_HOST=0.0.0.0
 BROWSERCONTROL_ADMIN_TOKEN=<long-random-admin-secret>
 BROWSERCONTROL_TRUST_PROXY=1     # only behind a trusted reverse proxy
 ```
 
-Optional durable pairings:
+Optional single-replica durable pairings:
 
 ```text
 BROWSERCONTROL_DEVICE_STORE_PATH=/durable/path/browsercontrol-devices.json
 ```
+
+Horizontally scaled replicas instead share Redis and a cluster secret:
+
+```text
+BROWSERCONTROL_REDIS_URL=rediss://...
+BROWSERCONTROL_REDIS_PREFIX=browsercontrol
+BROWSERCONTROL_RELAY_CLUSTER_TOKEN=<shared-cluster-secret>
+BROWSERCONTROL_RELAY_REPLICA_ID=<unique-replica-id>
+BROWSERCONTROL_RELAY_INTERNAL_URL=https://<this-replica-private-origin>
+```
+
+`BROWSERCONTROL_RELAY_INTERNAL_URL` must resolve to that exact replica rather than the public round-robin load balancer. Redis stores only control-plane state; screenshots and browser RPC bodies are forwarded directly between relay processes.
 
 Do **not** configure `BROWSERCONTROL_DEVICE_TOKEN` or `BROWSERCONTROL_MCP_TOKEN` on a public relay. Those are loopback-development compatibility options and are rejected in public mode.
 
@@ -145,7 +160,7 @@ Treat it like a password. If a client supports custom headers, use `Authorizatio
 #### Admin operations
 
 ```bash
-# List devices and connection state
+# List devices, connection state, and current owner replica
 curl https://YOUR_RELAY/devices \
   -H "Authorization: Bearer $BROWSERCONTROL_ADMIN_TOKEN"
 
@@ -158,13 +173,22 @@ curl -X DELETE https://YOUR_RELAY/devices/DEVICE_ID \
   -H "Authorization: Bearer $BROWSERCONTROL_ADMIN_TOKEN"
 ```
 
-Connector rotation leaves the extension connected. Full revocation invalidates both device credentials and immediately closes that device's WebSocket.
+Connector rotation leaves the extension connected. Full revocation invalidates both device credentials and asks the owning replica to close that device's WebSocket immediately.
 
-#### Multi-device behavior
+#### Multi-device and horizontal behavior
 
-One relay process maintains a `DeviceRouter` with an independent extension bridge and interactive lease for every paired device. A reconnect replaces only the same device's socket. MCP requests are routed from the authenticated token rather than from a client-supplied device ID.
+Each owning relay process maintains a `DeviceRouter` with an independent extension bridge and interactive lease for every locally connected device. A reconnect replaces only the same device's socket.
 
-For horizontal multi-instance scaling, live WebSocket ownership must also be routed (for example with sticky/device-aware routing or a shared broker). Randomly load-balancing MCP requests across stateless replicas is not sufficient.
+With Redis enabled, all replicas share:
+
+- hashed device/MCP credential indexes
+- pairing tickets
+- distributed rate-limit counters
+- TTL-backed device ownership records
+
+An MCP request can hit **any** healthy replica. The entry replica authenticates the device-scoped MCP token, resolves the current WebSocket owner from Redis, and forwards the MCP HTTP request directly to that owner's private relay endpoint using `BROWSERCONTROL_RELAY_CLUSTER_TOKEN`. Payloads do not transit Redis.
+
+If an owner dies, its presence expires automatically and the extension reconnects to another replica. If a device reconnects elsewhere before expiry, the newer connection wins and the old owner stops refreshing its stale connection ID.
 
 ---
 
@@ -175,12 +199,12 @@ For horizontal multi-instance scaling, live WebSocket ownership must also be rou
 - Every mutating remote MCP tool requires a fresh `observationId`.
 - DOM mutations and user pointer/keyboard/input/scroll activity invalidate prior observations, so old actions return `STALE_OBSERVATION`.
 - The extension retains local Pause and Disconnect authority; remote pause/resume is not exposed.
-- Interactive leases are independent per device.
-- Screenshots are forwarded in memory and are not intentionally persisted by the relay.
+- Interactive leases are independent per device and stay consistent because requests for one connected device converge on its owning relay.
+- Screenshots are forwarded in memory and are not intentionally persisted by the relay or Redis.
 
 The previously deferred shared-tab-scope behavior is intentionally unchanged in this release.
 
-See [`docs/WEB_CONTROL_PIPELINE.md`](docs/WEB_CONTROL_PIPELINE.md) for the full relay, pairing, routing, deployment, and external-client flow.
+See [`docs/WEB_CONTROL_PIPELINE.md`](docs/WEB_CONTROL_PIPELINE.md) for the full relay, pairing, horizontal routing, deployment, and external-client flow.
 
 ---
 
@@ -218,4 +242,4 @@ npm run test:integration
 npm test
 ```
 
-The `Web Control Pipeline CI` workflow runs deterministic install/build, the core suite, routed-relay tests, extension tests, and a headed Chrome-for-Testing WSS/MCP canary. The remote suite includes simultaneous two-device routing isolation, device credential rotation/revocation, durable credential-digest persistence, public/loopback trust-boundary tests, and chunked request-size enforcement.
+The `Web Control Pipeline CI` workflow starts Redis 7, runs deterministic install/build, the core suite, routed-relay tests, extension tests, and a headed Chrome-for-Testing WSS/MCP canary. The remote suite proves simultaneous multi-device isolation plus real two-replica routing: pairing can cross replicas, MCP can enter the non-owning replica, device leases remain consistent across entry replicas, ownership can move after reconnect, and revocation crosses replica boundaries.
