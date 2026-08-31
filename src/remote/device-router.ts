@@ -18,8 +18,19 @@ export class ExtensionBridge {
 
   constructor(public readonly deviceId: string) {}
 
+  private failPending(message: string, code = "DEVICE_OFFLINE"): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      pending.reject(Object.assign(new Error(message), { code }));
+      this.pending.delete(id);
+    }
+  }
+
   public attach(socket: WebSocket): void {
     const previous = this.socket;
+    if (previous && previous !== socket) {
+      this.failPending("browserControl device reconnected before the previous RPC completed", "DEVICE_RECONNECTED");
+    }
     this.socket = socket;
     if (previous && previous !== socket && previous.readyState === WebSocket.OPEN) {
       previous.close(4001, "Replaced by newer browserControl connection for this device");
@@ -48,24 +59,17 @@ export class ExtensionBridge {
     socket.on("close", () => {
       if (this.socket !== socket) return;
       this.socket = null;
-      for (const [id, pending] of this.pending) {
-        clearTimeout(pending.timer);
-        pending.reject(Object.assign(new Error("browserControl extension disconnected"), { code: "DEVICE_OFFLINE" }));
-        this.pending.delete(id);
-      }
+      this.failPending("browserControl extension disconnected");
     });
   }
 
   public disconnect(code = 4003, reason = "Device disconnected"): void {
     const socket = this.socket;
     this.socket = null;
-    if (!socket) return;
-    try { socket.close(code, reason); } catch { socket.terminate(); }
-    for (const [id, pending] of this.pending) {
-      clearTimeout(pending.timer);
-      pending.reject(Object.assign(new Error(reason), { code: "DEVICE_OFFLINE" }));
-      this.pending.delete(id);
+    if (socket) {
+      try { socket.close(code, reason); } catch { socket.terminate(); }
     }
+    this.failPending(reason);
   }
 
   public get connected(): boolean {
@@ -84,7 +88,13 @@ export class ExtensionBridge {
         reject(Object.assign(new Error(`Extension RPC timed out: ${method}`), { code: "DEVICE_TIMEOUT" }));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      socket.send(JSON.stringify({ id, method, params }));
+      try {
+        socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 }
