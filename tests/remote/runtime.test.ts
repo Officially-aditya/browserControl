@@ -26,4 +26,24 @@ describe("gateway runtime public-listener security", () => {
       ...tls,
     })).rejects.toThrow(/revocable device pairing/);
   });
+
+  it("requires a shared cluster token when Redis enables horizontal scaling", async () => {
+    await expect(runGatewayRuntime({
+      host: "0.0.0.0",
+      adminBearerToken: "admin",
+      redisUrl: "redis://127.0.0.1:1",
+      relayInternalUrl: "https://relay-1.internal.example",
+      ...tls,
+    })).rejects.toThrow(/BROWSERCONTROL_RELAY_CLUSTER_TOKEN/);
+  });
+
+  it("requires a peer-reachable per-replica URL for a public clustered TLS relay", async () => {
+    await expect(runGatewayRuntime({
+      host: "0.0.0.0",
+      adminBearerToken: "admin",
+      redisUrl: "redis://127.0.0.1:1",
+      clusterToken: "cluster-secret",
+      ...tls,
+    })).rejects.toThrow(/BROWSERCONTROL_RELAY_INTERNAL_URL/);
+  });
 });
