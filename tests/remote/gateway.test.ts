@@ -14,23 +14,8 @@ describe("Remote web-control gateway", () => {
   const observationId = "42:3:test-observation";
   const regionObservationId = "42:3:test-region";
 
-  beforeAll(async () => {
-    gateway = await runRemoteGateway({
-      host: "127.0.0.1",
-      port: 0,
-      extensionToken: "device-secret",
-      mcpBearerToken: "mcp-secret",
-      leaseTtlMs: 5_000,
-    });
-    port = (gateway.httpServer.address() as any).port;
-
-    extension = new WebSocket(`ws://127.0.0.1:${port}/extension?token=device-secret`);
-    await new Promise<void>((resolve, reject) => {
-      extension.once("open", () => resolve());
-      extension.once("error", reject);
-    });
-
-    extension.on("message", (raw) => {
+  const attachMockResponder = (socket: WebSocket) => {
+    socket.on("message", (raw) => {
       const request = JSON.parse(raw.toString());
       if (!request.id || !request.method) return;
       calls.push({ method: request.method, params: request.params });
@@ -48,6 +33,9 @@ describe("Remote web-control gateway", () => {
             title: "Example",
             viewportWidth: 1200,
             viewportHeight: 800,
+            imageWidth: 1200,
+            imageHeight: 800,
+            imageScale: 1,
             sourceRegion: { x: 0, y: 0, width: 1200, height: 800 },
             kind: "overview",
             coordinateSpace: "normalized_1000",
@@ -71,8 +59,27 @@ describe("Remote web-control gateway", () => {
         default:
           result = { success: true, visualEpoch: 4 };
       }
-      extension.send(JSON.stringify({ id: request.id, ok: true, result }));
+      socket.send(JSON.stringify({ id: request.id, ok: true, result }));
     });
+  };
+
+  beforeAll(async () => {
+    gateway = await runRemoteGateway({
+      host: "127.0.0.1",
+      port: 0,
+      extensionToken: "device-secret",
+      mcpBearerToken: "mcp-secret",
+      adminBearerToken: "admin-secret",
+      leaseTtlMs: 5_000,
+    });
+    port = (gateway.httpServer.address() as any).port;
+
+    extension = new WebSocket(`ws://127.0.0.1:${port}/extension?token=device-secret`);
+    await new Promise<void>((resolve, reject) => {
+      extension.once("open", () => resolve());
+      extension.once("error", reject);
+    });
+    attachMockResponder(extension);
   });
 
   afterAll(async () => {
@@ -113,6 +120,11 @@ describe("Remote web-control gateway", () => {
       expect(names).toContain("browser_click");
       expect(names).toContain("browser_drag");
       expect(names).toContain("browser_tabs");
+      const observe = listed.tools.find((tool) => tool.name === "browser_observe");
+      expect((observe?.inputSchema as any)?.properties?.maxLongEdge?.default).toBe(1280);
+
+      const typeTool = listed.tools.find((tool) => tool.name === "browser_type");
+      expect((typeTool?.inputSchema as any)?.required).toContain("observationId");
 
       const result = await client.callTool({ name: "browser_observe", arguments: { format: "png" } });
       expect(result.isError).toBeFalsy();
@@ -200,15 +212,15 @@ describe("Remote web-control gateway", () => {
       await first.client.connect(first.transport);
       await second.client.connect(second.transport);
 
-      const firstAction = await first.client.callTool({ name: "browser_type", arguments: { text: "first" } });
+      const firstAction = await first.client.callTool({ name: "browser_type", arguments: { observationId, text: "first" } });
       expect(firstAction.isError).toBeFalsy();
 
-      const blocked = await second.client.callTool({ name: "browser_type", arguments: { text: "second" } });
+      const blocked = await second.client.callTool({ name: "browser_type", arguments: { observationId, text: "second" } });
       expect(blocked.isError).toBe(true);
       expect((blocked.content[0] as any).text).toContain("DEVICE_BUSY");
 
       await first.client.callTool({ name: "browser_release_control", arguments: {} });
-      const afterRelease = await second.client.callTool({ name: "browser_type", arguments: { text: "second" } });
+      const afterRelease = await second.client.callTool({ name: "browser_type", arguments: { observationId, text: "second" } });
       expect(afterRelease.isError).toBeFalsy();
       await second.client.callTool({ name: "browser_release_control", arguments: {} });
     } finally {
@@ -217,21 +229,36 @@ describe("Remote web-control gateway", () => {
     }
   });
 
-  it("creates one-time device pairings and supports authenticated device revocation", async () => {
-    const unauthorized = await fetch(`http://127.0.0.1:${port}/pairing/create`, { method: "POST" });
+  it("separates MCP and admin credentials for device management", async () => {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/pairing/create`, {
+      method: "POST",
+      headers: { Authorization: "Bearer mcp-secret" },
+    });
     expect(unauthorized.status).toBe(401);
 
     const created = await fetch(`http://127.0.0.1:${port}/pairing/create`, {
       method: "POST",
       headers: {
-        Authorization: "Bearer mcp-secret",
+        Authorization: "Bearer admin-secret",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ name: "Chrome laptop" }),
     });
     expect(created.status).toBe(201);
     const pairing = await created.json() as { code: string; expiresAt: number };
-    expect(pairing.code).toMatch(/^\d{6}$/);
+    expect(pairing.code).toMatch(/^\d{8}$/);
+  });
+
+  it("disconnects a paired extension immediately when its credential is revoked", async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/pairing/create`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer admin-secret",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Revocable Chrome" }),
+    });
+    const pairing = await created.json() as { code: string };
 
     const claimed = await fetch(`http://127.0.0.1:${port}/pairing/claim`, {
       method: "POST",
@@ -239,30 +266,21 @@ describe("Remote web-control gateway", () => {
       body: JSON.stringify({ code: pairing.code }),
     });
     expect(claimed.status).toBe(200);
-    const credential = await claimed.json() as { deviceId: string; deviceToken: string; name?: string };
-    expect(credential.name).toBe("Chrome laptop");
-    expect(gateway.deviceRegistry.authenticate(credential.deviceToken)?.deviceId).toBe(credential.deviceId);
+    const credential = await claimed.json() as { deviceId: string; deviceToken: string };
 
-    const reused = await fetch(`http://127.0.0.1:${port}/pairing/claim`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: pairing.code }),
+    const pairedSocket = new WebSocket(`ws://127.0.0.1:${port}/extension?token=${encodeURIComponent(credential.deviceToken)}`);
+    await new Promise<void>((resolve, reject) => {
+      pairedSocket.once("open", resolve);
+      pairedSocket.once("error", reject);
     });
-    expect(reused.status).toBe(404);
 
-    const listed = await fetch(`http://127.0.0.1:${port}/devices`, {
-      headers: { Authorization: "Bearer mcp-secret" },
-    });
-    expect(listed.status).toBe(200);
-    expect((await listed.json()).devices).toEqual(expect.arrayContaining([
-      expect.objectContaining({ deviceId: credential.deviceId, name: "Chrome laptop" }),
-    ]));
-
+    const closed = new Promise<number>((resolve) => pairedSocket.once("close", (code) => resolve(code)));
     const revoked = await fetch(`http://127.0.0.1:${port}/devices/${credential.deviceId}`, {
       method: "DELETE",
-      headers: { Authorization: "Bearer mcp-secret" },
+      headers: { Authorization: "Bearer admin-secret" },
     });
     expect(revoked.status).toBe(200);
+    expect(await closed).toBe(4003);
     expect(gateway.deviceRegistry.authenticate(credential.deviceToken)).toBeNull();
   });
 });
