@@ -113,7 +113,33 @@ class ControlLease {
   }
 }
 
+class FixedWindowRateLimiter {
+  private readonly entries = new Map<string, { startedAt: number; count: number }>();
+
+  constructor(private readonly limit: number, private readonly windowMs: number) {}
+
+  public consume(key: string): { allowed: boolean; retryAfterMs: number } {
+    const now = Date.now();
+    const current = this.entries.get(key);
+    if (!current || now - current.startedAt >= this.windowMs) {
+      this.entries.set(key, { startedAt: now, count: 1 });
+      return { allowed: true, retryAfterMs: 0 };
+    }
+    if (current.count >= this.limit) {
+      return { allowed: false, retryAfterMs: Math.max(1, this.windowMs - (now - current.startedAt)) };
+    }
+    current.count += 1;
+    return { allowed: true, retryAfterMs: 0 };
+  }
+}
+
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false } as const;
+const OBSERVATION_SCHEMA = {
+  type: "object" as const,
+  properties: { observationId: { type: "string" } },
+  required: ["observationId"],
+  additionalProperties: false,
+};
 const POINT_PROPERTIES = {
   observationId: { type: "string" },
   x: { type: "number", minimum: 0, maximum: 1000 },
@@ -149,6 +175,7 @@ function textResult(value: unknown) {
 }
 
 function safeTokenEqual(provided: string, expected: string): boolean {
+  if (!provided || !expected) return false;
   const providedBytes = Buffer.from(provided, "utf8");
   const expectedBytes = Buffer.from(expected, "utf8");
   return providedBytes.length === expectedBytes.length && timingSafeEqual(providedBytes, expectedBytes);
@@ -165,8 +192,23 @@ function isLoopbackHost(host: string): boolean {
   return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "::";
 }
 
-function writeJson(response: http.ServerResponse, status: number, value: unknown): void {
-  response.writeHead(status, { "Content-Type": "application/json" });
+function requestAddress(request: http.IncomingMessage, trustProxy: boolean): string {
+  if (trustProxy) {
+    const forwarded = request.headers["x-forwarded-for"];
+    const value = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+    const first = value?.split(",")[0]?.trim();
+    if (first) return first.slice(0, 128);
+  }
+  return request.socket.remoteAddress || "unknown";
+}
+
+function writeJson(response: http.ServerResponse, status: number, value: unknown, extraHeaders: Record<string, string> = {}): void {
+  response.writeHead(status, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    ...extraHeaders,
+  });
   response.end(JSON.stringify(value));
 }
 
@@ -220,12 +262,13 @@ function tools(): Tool[] {
     },
     {
       name: "browser_observe",
-      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values and coordinate actions must reference the returned observationId.",
+      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values and mutating actions must reference the returned observationId.",
       inputSchema: {
         type: "object" as const,
         properties: {
           format: { type: "string", enum: ["jpeg", "png", "webp"], default: "jpeg" },
           quality: { type: "number", minimum: 1, maximum: 100, default: 82 },
+          maxLongEdge: { type: "number", minimum: 480, maximum: 2000, default: 1280 },
         },
         additionalProperties: false,
       },
@@ -314,17 +357,29 @@ function tools(): Tool[] {
         additionalProperties: false,
       },
     },
-    { name: "browser_type", description: "Insert text into the focused element in the shared tab.", inputSchema: { type: "object" as const, properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false } },
-    { name: "browser_keypress", description: "Send a keyboard shortcut.", inputSchema: { type: "object" as const, properties: { keys: { type: "array", minItems: 1, items: { type: "string" } } }, required: ["keys"], additionalProperties: false } },
-    { name: "browser_navigate", description: "Navigate the shared tab to an absolute URL.", inputSchema: { type: "object" as const, properties: { url: { type: "string", format: "uri" } }, required: ["url"], additionalProperties: false } },
-    { name: "browser_back", description: "Navigate backward in history.", inputSchema: EMPTY_SCHEMA },
-    { name: "browser_forward", description: "Navigate forward in history.", inputSchema: EMPTY_SCHEMA },
-    { name: "browser_reload", description: "Reload the shared tab.", inputSchema: EMPTY_SCHEMA },
+    {
+      name: "browser_type",
+      description: "Insert text into the focused element only if the referenced observation is still current.",
+      inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string" } }, required: ["observationId", "text"], additionalProperties: false },
+    },
+    {
+      name: "browser_keypress",
+      description: "Send a keyboard shortcut only if the referenced observation is still current.",
+      inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, items: { type: "string" } } }, required: ["observationId", "keys"], additionalProperties: false },
+    },
+    {
+      name: "browser_navigate",
+      description: "Navigate the currently shared tab to an absolute URL from a fresh observation.",
+      inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri" } }, required: ["observationId", "url"], additionalProperties: false },
+    },
+    { name: "browser_back", description: "Navigate backward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
+    { name: "browser_forward", description: "Navigate forward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
+    { name: "browser_reload", description: "Reload the shared tab from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
     { name: "browser_tabs", description: "List Chrome tabs visible to browserControl. Read-only.", inputSchema: EMPTY_SCHEMA },
-    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs.", inputSchema: { type: "object" as const, properties: { targetId: { type: "string" } }, required: ["targetId"], additionalProperties: false } },
-    { name: "browser_new_tab", description: "Create a new tab and share it for control.", inputSchema: { type: "object" as const, properties: { url: { type: "string", format: "uri" } }, additionalProperties: false } },
-    { name: "browser_close_tab", description: "Close a tab. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { targetId: { type: "string" } }, additionalProperties: false } },
-    { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog.", inputSchema: { type: "object" as const, properties: { accept: { type: "boolean" }, promptText: { type: "string" } }, required: ["accept"], additionalProperties: false } },
+    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string" } }, required: ["observationId", "targetId"], additionalProperties: false } },
+    { name: "browser_new_tab", description: "Create a new tab from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri" } }, required: ["observationId"], additionalProperties: false } },
+    { name: "browser_close_tab", description: "Close a tab from a fresh observation. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string" } }, required: ["observationId"], additionalProperties: false } },
+    { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, accept: { type: "boolean" }, promptText: { type: "string" } }, required: ["observationId", "accept"], additionalProperties: false } },
     { name: "browser_release_control", description: "Release this client's exclusive interactive-control lease.", inputSchema: EMPTY_SCHEMA },
   ];
 }
@@ -345,7 +400,7 @@ function requestClientId(requestInfo?: Request): string {
 }
 
 function createGatewayMcpServer(bridge: ExtensionBridge, lease: ControlLease, clientId: string): Server {
-  const server = new Server({ name: "browser-control-remote", version: "0.4.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "browser-control-remote", version: "0.5.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler("tools/list", async () => ({ tools: tools() }));
 
   const mutate = async (method: string, params: Record<string, any>) => {
@@ -403,10 +458,13 @@ export interface RemoteGatewayOptions {
   host?: string;
   extensionToken?: string;
   mcpBearerToken?: string;
+  adminBearerToken?: string;
   deviceRegistry?: DeviceRegistry;
   pairingManager?: PairingManager;
   leaseTtlMs?: number;
   maxMcpBodySize?: number;
+  trustProxy?: boolean;
+  pairingAttemptsPerMinute?: number;
 }
 
 export interface RemoteGatewayHandle {
@@ -415,25 +473,44 @@ export interface RemoteGatewayHandle {
   deviceRegistry: DeviceRegistry;
   pairingManager: PairingManager;
   mcpBearerToken: string;
+  adminBearerToken: string;
 }
 
 export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Promise<RemoteGatewayHandle> {
   const port = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
   const host = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
+  const loopback = isLoopbackHost(host);
   const extensionToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
   const configuredMcpBearerToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
-  if (!configuredMcpBearerToken && !isLoopbackHost(host)) {
+  const configuredAdminBearerToken = options.adminBearerToken ?? process.env.BROWSERCONTROL_ADMIN_TOKEN ?? "";
+  const trustProxy = options.trustProxy ?? process.env.BROWSERCONTROL_TRUST_PROXY === "1";
+
+  if (!configuredMcpBearerToken && !loopback) {
     throw new Error("BROWSERCONTROL_MCP_TOKEN is required when the gateway is not bound to loopback");
   }
+  if (!configuredAdminBearerToken && !loopback) {
+    throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the gateway is not bound to loopback");
+  }
+  if (extensionToken && !loopback) {
+    throw new Error("BROWSERCONTROL_DEVICE_TOKEN is only supported for loopback development; deployed gateways must use revocable device pairing");
+  }
+
   const mcpBearerToken = configuredMcpBearerToken || randomBytes(32).toString("base64url");
+  const adminBearerToken = configuredAdminBearerToken || randomBytes(32).toString("base64url");
   const maxMcpBodySize = options.maxMcpBodySize ?? 2 * 1024 * 1024;
   const bridge = new ExtensionBridge();
   const lease = new ControlLease(options.leaseTtlMs ?? 60_000);
   const deviceRegistry = options.deviceRegistry ?? new DeviceRegistry();
   const pairingManager = options.pairingManager ?? new PairingManager(deviceRegistry);
+  const pairingIpLimiter = new FixedWindowRateLimiter(options.pairingAttemptsPerMinute ?? 12, 60_000);
+  const pairingGlobalLimiter = new FixedWindowRateLimiter(120, 60_000);
+  const mcpLimiter = new FixedWindowRateLimiter(600, 60_000);
 
   if (!configuredMcpBearerToken) {
     console.warn(`[browserControl] Generated temporary MCP bearer token: ${mcpBearerToken}`);
+  }
+  if (!configuredAdminBearerToken) {
+    console.warn(`[browserControl] Generated temporary admin bearer token: ${adminBearerToken}`);
   }
 
   const mcpHandler = createMcpHandler(
@@ -450,19 +527,19 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     return safeTokenEqual(auth, mcpBearerToken) || safeTokenEqual(queryToken, mcpBearerToken);
   };
 
-  const authorizedAdminRequest = (req: http.IncomingMessage) => safeTokenEqual(bearerToken(req), mcpBearerToken);
+  const authorizedAdminRequest = (req: http.IncomingMessage) => safeTokenEqual(bearerToken(req), adminBearerToken);
 
-  const authorizedExtensionRequest = (token: string) => {
-    if (extensionToken && safeTokenEqual(token, extensionToken)) return true;
-    return Boolean(deviceRegistry.authenticate(token));
+  const authenticateExtensionRequest = (token: string): { deviceId?: string } | null => {
+    if (loopback && extensionToken && safeTokenEqual(token, extensionToken)) return {};
+    const device = deviceRegistry.authenticate(token);
+    return device ? { deviceId: device.deviceId } : null;
   };
 
   const httpServer = http.createServer((req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
     if (url.pathname === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, extensionConnected: bridge.connected }));
+      writeJson(res, 200, { ok: true, extensionConnected: bridge.connected });
       return;
     }
 
@@ -482,11 +559,22 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     }
 
     if (url.pathname === "/pairing/claim" && req.method === "POST") {
+      const address = requestAddress(req, trustProxy);
+      const perIp = pairingIpLimiter.consume(address);
+      const global = pairingGlobalLimiter.consume("global");
+      if (!perIp.allowed || !global.allowed) {
+        const retryAfterMs = Math.max(perIp.retryAfterMs, global.retryAfterMs);
+        writeJson(res, 429, { error: "Too many pairing attempts" }, { "Retry-After": String(Math.ceil(retryAfterMs / 1000)) });
+        req.resume();
+        return;
+      }
+
       void readJsonBody(req, maxMcpBodySize)
         .then((body) => {
           const code = typeof body.code === "string" ? body.code.trim() : "";
-          if (!/^\d{6}$/.test(code)) {
-            writeJson(res, 400, { error: "Pairing code must be six digits" });
+          const codePattern = new RegExp(`^\\d{${pairingManager.digits}}$`);
+          if (!codePattern.test(code)) {
+            writeJson(res, 400, { error: `Pairing code must be ${pairingManager.digits} digits` });
             return;
           }
           const credential = pairingManager.claim(code);
@@ -524,20 +612,25 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     }
 
     if (url.pathname !== "/mcp") {
-      res.writeHead(404).end("Not found");
+      writeJson(res, 404, { error: "Not found" });
       return;
     }
 
     if (!authorizedMcpRequest(req, url)) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Unauthorized" }));
+      writeJson(res, 401, { error: "Unauthorized" });
+      return;
+    }
+
+    const limit = mcpLimiter.consume(requestAddress(req, trustProxy));
+    if (!limit.allowed) {
+      writeJson(res, 429, { error: "Too many MCP requests" }, { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) });
+      req.resume();
       return;
     }
 
     const contentLength = Number(req.headers["content-length"] || 0);
     if (Number.isFinite(contentLength) && contentLength > maxMcpBodySize) {
-      res.writeHead(413, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Payload too large" }));
+      writeJson(res, 413, { error: "Payload too large" });
       req.resume();
       return;
     }
@@ -545,23 +638,56 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     void nodeMcpHandler(req, res);
   });
 
+  const wss = new WebSocketServer({ noServer: true });
+  const socketDeviceIds = new WeakMap<WebSocket, string>();
+  const deviceSockets = new Map<string, Set<WebSocket>>();
+
+  const unregisterSocket = (ws: WebSocket) => {
+    const deviceId = socketDeviceIds.get(ws);
+    if (!deviceId) return;
+    const sockets = deviceSockets.get(deviceId);
+    sockets?.delete(ws);
+    if (sockets?.size === 0) deviceSockets.delete(deviceId);
+  };
+
+  const unregisterRevocation = deviceRegistry.onRevoked((deviceId) => {
+    const sockets = deviceSockets.get(deviceId);
+    if (!sockets) return;
+    for (const ws of [...sockets]) {
+      try { ws.close(4003, "Device credential revoked"); } catch { ws.terminate(); }
+    }
+  });
+
   httpServer.once("close", () => {
+    unregisterRevocation();
     void mcpHandler.close();
   });
 
-  const wss = new WebSocketServer({ noServer: true });
   httpServer.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     if (url.pathname !== "/extension") {
       socket.destroy();
       return;
     }
-    if (!authorizedExtensionRequest(url.searchParams.get("token") || "")) {
+    const auth = authenticateExtensionRequest(url.searchParams.get("token") || "");
+    if (!auth) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      if (auth.deviceId) {
+        socketDeviceIds.set(ws, auth.deviceId);
+        let sockets = deviceSockets.get(auth.deviceId);
+        if (!sockets) {
+          sockets = new Set();
+          deviceSockets.set(auth.deviceId, sockets);
+        }
+        sockets.add(ws);
+        ws.once("close", () => unregisterSocket(ws));
+      }
+      wss.emit("connection", ws, request);
+    });
   });
   wss.on("connection", (ws) => bridge.attach(ws));
 
@@ -576,7 +702,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   console.log(`[browserControl] MCP endpoint: http://${host}:${actualPort}/mcp`);
   console.log(`[browserControl] Extension endpoint: ws://${host}:${actualPort}/extension`);
 
-  return { httpServer, wss, deviceRegistry, pairingManager, mcpBearerToken };
+  return { httpServer, wss, deviceRegistry, pairingManager, mcpBearerToken, adminBearerToken };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

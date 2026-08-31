@@ -16,6 +16,11 @@ export interface GatewayRuntimeHandle {
   stopHeartbeat: () => void;
 }
 
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "::";
+}
+
 export function installExtensionHeartbeat(
   wss: WebSocketServer,
   options: Pick<GatewayRuntimeOptions, "heartbeatIntervalMs" | "heartbeatTimeoutMs"> = {}
@@ -45,7 +50,6 @@ export function installExtensionHeartbeat(
         continue;
       }
       try {
-        // Application-level traffic keeps Chrome MV3 service workers active.
         ws.send(JSON.stringify({ type: "keepalive", timestamp: now }));
         ws.ping();
       } catch {
@@ -88,12 +92,29 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
 
   const publicHost = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
   const publicPort = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
+  const localPublicListener = isLoopbackHost(publicHost);
+  const configuredMcpToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
+  const configuredAdminToken = options.adminBearerToken ?? process.env.BROWSERCONTROL_ADMIN_TOKEN ?? "";
+  const configuredDeviceToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
+
+  if (!localPublicListener && !configuredMcpToken) {
+    throw new Error("BROWSERCONTROL_MCP_TOKEN is required when the TLS gateway is publicly bound");
+  }
+  if (!localPublicListener && !configuredAdminToken) {
+    throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the TLS gateway is publicly bound");
+  }
+  if (!localPublicListener && configuredDeviceToken) {
+    throw new Error("BROWSERCONTROL_DEVICE_TOKEN is only supported for loopback development; public TLS gateways must use revocable device pairing");
+  }
 
   // Keep the proven MCP/WebSocket gateway on a private ephemeral loopback port
-  // and put a transparent TLS terminator in front of it. This mirrors normal
-  // production deployment behind a TLS reverse proxy without duplicating MCP logic.
+  // and put a transparent TLS terminator in front of it. Authentication policy
+  // is validated against the public listener above, not the private loopback hop.
   const internalGateway = await runRemoteGateway({
     ...options,
+    mcpBearerToken: configuredMcpToken,
+    adminBearerToken: configuredAdminToken,
+    extensionToken: localPublicListener ? configuredDeviceToken : "",
     host: "127.0.0.1",
     port: 0,
   });

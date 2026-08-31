@@ -20,12 +20,15 @@ interface PairingRecord {
   name?: string;
 }
 
+type RevocationListener = (deviceId: string) => void;
+
 function digest(token: string): Buffer {
   return createHash("sha256").update(token).digest();
 }
 
 export class DeviceRegistry {
   private readonly devices = new Map<string, StoredDevice>();
+  private readonly revocationListeners = new Set<RevocationListener>();
 
   public issue(name?: string): DeviceCredential {
     const deviceId = randomBytes(12).toString("hex");
@@ -55,7 +58,13 @@ export class DeviceRegistry {
     const device = this.devices.get(deviceId);
     if (!device || device.revokedAt) return false;
     device.revokedAt = Date.now();
+    for (const listener of this.revocationListeners) listener(deviceId);
     return true;
+  }
+
+  public onRevoked(listener: RevocationListener): () => void {
+    this.revocationListeners.add(listener);
+    return () => this.revocationListeners.delete(listener);
   }
 
   public list(): Array<{ deviceId: string; name?: string; createdAt: number; revokedAt?: number }> {
@@ -68,14 +77,20 @@ export class PairingManager {
 
   constructor(
     private readonly registry: DeviceRegistry,
-    private readonly ttlMs = 5 * 60_000
-  ) {}
+    private readonly ttlMs = 5 * 60_000,
+    private readonly codeDigits = 8
+  ) {
+    if (!Number.isInteger(codeDigits) || codeDigits < 6 || codeDigits > 12) {
+      throw new Error("Pairing code length must be between 6 and 12 digits");
+    }
+  }
 
   public create(name?: string): { code: string; expiresAt: number } {
     this.prune();
+    const upperBound = 10 ** this.codeDigits;
     let code = "";
     do {
-      code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+      code = String(randomInt(0, upperBound)).padStart(this.codeDigits, "0");
     } while (this.pairs.has(code));
     const expiresAt = Date.now() + this.ttlMs;
     this.pairs.set(code, { code, expiresAt, name });
@@ -88,6 +103,10 @@ export class PairingManager {
     if (!pair) return null;
     this.pairs.delete(code);
     return this.registry.issue(pair.name);
+  }
+
+  public get digits(): number {
+    return this.codeDigits;
   }
 
   private prune(): void {

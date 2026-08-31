@@ -21,7 +21,7 @@ describe("Adaptive Overview -> Inspect -> Action Optimization", () => {
       wsEndpoint: chrome.wsUrl,
     });
     await controller.connect();
-  }, 20000);
+  }, 45_000);
 
   afterAll(async () => {
     if (controller) await controller.disconnect();

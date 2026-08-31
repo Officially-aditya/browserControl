@@ -12,21 +12,28 @@ describe("remote device authentication", () => {
     expect(JSON.stringify(registry.list())).not.toContain(issued.deviceToken);
   });
 
-  it("revokes a device token immediately", () => {
+  it("revokes a device token immediately and emits a revocation event", () => {
     const registry = new DeviceRegistry();
     const issued = registry.issue();
+    const revoked: string[] = [];
+    const unsubscribe = registry.onRevoked((deviceId) => revoked.push(deviceId));
+
     expect(registry.authenticate(issued.deviceToken)?.deviceId).toBe(issued.deviceId);
     expect(registry.revoke(issued.deviceId)).toBe(true);
     expect(registry.authenticate(issued.deviceToken)).toBeNull();
+    expect(revoked).toEqual([issued.deviceId]);
     expect(registry.revoke(issued.deviceId)).toBe(false);
+
+    unsubscribe();
   });
 
-  it("claims each pairing code at most once", () => {
+  it("uses eight-digit one-time pairing codes by default", () => {
     const registry = new DeviceRegistry();
     const pairing = new PairingManager(registry);
     const { code } = pairing.create("Desktop");
 
-    expect(code).toMatch(/^\d{6}$/);
+    expect(pairing.digits).toBe(8);
+    expect(code).toMatch(/^\d{8}$/);
     const credential = pairing.claim(code);
     expect(credential?.name).toBe("Desktop");
     expect(credential && registry.authenticate(credential.deviceToken)?.deviceId).toBe(credential?.deviceId);
@@ -44,5 +51,9 @@ describe("remote device authentication", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("enforces the configured pairing-code length bounds", () => {
+    expect(() => new PairingManager(new DeviceRegistry(), 1_000, 5)).toThrow(/between 6 and 12/);
   });
 });

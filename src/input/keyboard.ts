@@ -153,9 +153,6 @@ export class KeyboardController {
     };
   }
 
-  /**
-   * Get editing command names for shortcuts (e.g. Meta+A -> SelectAll, Meta+C -> Copy)
-   */
   private getEditingCommands(keyStr: string, hasCommandModifier: boolean, hasShift: boolean): string[] {
     if (!hasCommandModifier) return [];
     const lower = keyStr.toLowerCase();
@@ -168,9 +165,6 @@ export class KeyboardController {
     return [];
   }
 
-  /**
-   * Dispatch single key down and record into InputState
-   */
   public async keyDown(key: string, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
@@ -187,9 +181,6 @@ export class KeyboardController {
     });
   }
 
-  /**
-   * Dispatch single key up and remove from InputState
-   */
   public async keyUp(key: string, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
@@ -206,9 +197,6 @@ export class KeyboardController {
     });
   }
 
-  /**
-   * Dispatch complete key combination / shortcut
-   */
   public async keypress(keys: string[], signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error("ACTION_CANCELLED");
     if (!keys.length) return;
@@ -225,14 +213,12 @@ export class KeyboardController {
       return;
     }
 
-    const isMac = process.platform === "darwin";
-    let platformAdjustedModifiers = effectiveModifiers;
-    if (!isMac && (platformAdjustedModifiers & MODIFIERS.Meta)) {
-      platformAdjustedModifiers = (platformAdjustedModifiers & ~MODIFIERS.Meta) | MODIFIERS.Control;
-    }
-
-    const hasCommandModifier = (platformAdjustedModifiers & (MODIFIERS.Meta | MODIFIERS.Control)) !== 0;
-    const hasShift = (platformAdjustedModifiers & MODIFIERS.Shift) !== 0;
+    // Preserve the modifier the caller explicitly requested. Browser-control
+    // callers already express platform intent via Meta/Cmd vs Control/Ctrl;
+    // silently remapping Meta to Control on non-macOS breaks remote sessions
+    // when the controlled browser's platform differs from the Node host.
+    const hasCommandModifier = (effectiveModifiers & (MODIFIERS.Meta | MODIFIERS.Control)) !== 0;
+    const hasShift = (effectiveModifiers & MODIFIERS.Shift) !== 0;
 
     for (const key of nonModifierKeys) {
       if (signal?.aborted) throw new Error("ACTION_CANCELLED");
@@ -242,7 +228,7 @@ export class KeyboardController {
 
       const keyParams: any = {
         type: "rawKeyDown",
-        modifiers: platformAdjustedModifiers,
+        modifiers: effectiveModifiers,
         key: def.key,
         code: def.code,
         windowsVirtualKeyCode: def.windowsVirtualKeyCode,
@@ -259,7 +245,7 @@ export class KeyboardController {
       if (def.text && !hasCommandModifier) {
         await this.session.send("Input.dispatchKeyEvent", {
           type: "char",
-          modifiers: platformAdjustedModifiers,
+          modifiers: effectiveModifiers,
           key: def.key,
           code: def.code,
           text: def.text,
@@ -272,7 +258,7 @@ export class KeyboardController {
 
       await this.session.send("Input.dispatchKeyEvent", {
         type: "keyUp",
-        modifiers: platformAdjustedModifiers,
+        modifiers: effectiveModifiers,
         key: def.key,
         code: def.code,
         windowsVirtualKeyCode: def.windowsVirtualKeyCode,
@@ -280,11 +266,6 @@ export class KeyboardController {
     }
   }
 
-  /**
-   * Type text using keyboard events or insertText
-   * "auto" mode dispatches key events and insertText fallback for 100% universal support
-   * across input, textarea, contenteditable, and canvas.
-   */
   public async type(text: string, method: TypingMethod = "auto", signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error("ACTION_CANCELLED");
     if (!text) return;
@@ -344,8 +325,6 @@ export class KeyboardController {
       return;
     }
 
-    // Default "auto": dispatches keydown events + insertText to guarantee compatibility
-    // with both DOM inputs (input/textarea/contenteditable) and canvas listeners
     for (const char of chars) {
       if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
@@ -358,7 +337,6 @@ export class KeyboardController {
         const isUpperCase = char >= "A" && char <= "Z";
         const charModifiers = isUpperCase ? (this.inputState.modifierBitmask | MODIFIERS.Shift) : this.inputState.modifierBitmask;
 
-        // 1. Dispatch key event for listeners
         await this.session.send("Input.dispatchKeyEvent", {
           type: "rawKeyDown",
           modifiers: charModifiers,
@@ -369,10 +347,8 @@ export class KeyboardController {
           unmodifiedText: char,
         });
 
-        // 2. Insert text character
         await this.session.send("Input.insertText", { text: char });
 
-        // 3. Dispatch keyUp
         await this.session.send("Input.dispatchKeyEvent", {
           type: "keyUp",
           modifiers: charModifiers,
@@ -388,9 +364,6 @@ export class KeyboardController {
     }
   }
 
-  /**
-   * Reset all held keyboard keys without affecting mouse state
-   */
   public async reset(): Promise<void> {
     const { releasedKeys } = this.inputState.resetKeyboard();
     for (const key of releasedKeys) {

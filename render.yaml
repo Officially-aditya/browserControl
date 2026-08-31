@@ -8,7 +8,9 @@ services:
     envVars:
       - key: BROWSERCONTROL_GATEWAY_HOST
         value: 0.0.0.0
-      - key: BROWSERCONTROL_DEVICE_TOKEN
-        generateValue: true
       - key: BROWSERCONTROL_MCP_TOKEN
         generateValue: true
+      - key: BROWSERCONTROL_ADMIN_TOKEN
+        generateValue: true
+      - key: BROWSERCONTROL_TRUST_PROXY
+        value: "1"
