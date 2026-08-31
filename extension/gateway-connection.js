@@ -19,7 +19,7 @@ export function getGatewayHttpUrl(gatewayUrl, pathname = "/") {
 export function getGatewayPermissionOrigin(gatewayUrl) {
   try {
     const url = getGatewayHttpUrl(gatewayUrl, "/");
-    return `${url.protocol}//${url.host}/*`;
+    return `${url.protocol}//${url.hostname}/*`;
   } catch {
     return null;
   }
