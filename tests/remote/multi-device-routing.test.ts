@@ -140,6 +140,9 @@ describe("multi-device relay routing", () => {
       expect(devices[0].calls.some((call) => call.method === "click" && call.params.x === 900)).toBe(false);
       expect(devices[1].calls.some((call) => call.method === "click" && call.params.x === 900)).toBe(true);
       expect(devices[1].calls.some((call) => call.method === "click" && call.params.x === 100)).toBe(false);
+
+      await alice.client.callTool({ name: "browser_release_control", arguments: {} });
+      await bob.client.callTool({ name: "browser_release_control", arguments: {} });
     } finally {
       await alice.client.close();
       await bob.client.close();
@@ -156,6 +159,8 @@ describe("multi-device relay routing", () => {
       const bobAction = await bob.client.callTool({ name: "browser_type", arguments: { observationId: devices[1].observationId, text: "bob" } });
       expect(aliceAction.isError).toBeFalsy();
       expect(bobAction.isError).toBeFalsy();
+      await alice.client.callTool({ name: "browser_release_control", arguments: {} });
+      await bob.client.callTool({ name: "browser_release_control", arguments: {} });
     } finally {
       await alice.client.close();
       await bob.client.close();
