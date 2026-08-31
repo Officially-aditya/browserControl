@@ -100,7 +100,10 @@ export class RedisClient {
     this.socket = null;
     if (!socket) return;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 250);
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve();
+      }, 250);
       socket.once("close", () => {
         clearTimeout(timer);
         resolve();
@@ -118,44 +121,55 @@ export class RedisClient {
 
   private async open(): Promise<void> {
     const host = this.url.hostname;
-    const port = Number(this.url.port || (this.url.protocol === "rediss:" ? 6380 : 6379));
-    const socket = this.url.protocol === "rediss:"
+    const secure = this.url.protocol === "rediss:";
+    const port = Number(this.url.port || (secure ? 6380 : 6379));
+    const socket = secure
       ? tls.connect({ host, port, servername: host })
       : net.connect({ host, port });
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Timed out connecting to Redis at ${host}:${port}`)), this.connectTimeoutMs);
-      const onError = (error: Error) => {
-        clearTimeout(timer);
-        reject(error);
-      };
-      socket.once("error", onError);
-      socket.once("connect", () => {
-        clearTimeout(timer);
-        socket.off("error", onError);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const readyEvent = secure ? "secureConnect" : "connect";
+        const timer = setTimeout(() => {
+          socket.destroy();
+          reject(new Error(`Timed out connecting to Redis at ${host}:${port}`));
+        }, this.connectTimeoutMs);
+        const onError = (error: Error) => {
+          clearTimeout(timer);
+          reject(error);
+        };
+        socket.once("error", onError);
+        socket.once(readyEvent, () => {
+          clearTimeout(timer);
+          socket.off("error", onError);
+          resolve();
+        });
       });
-    });
 
-    this.socket = socket;
-    this.incoming = Buffer.alloc(0);
-    socket.on("data", (chunk) => this.onData(Buffer.from(chunk)));
-    socket.on("error", (error) => this.onSocketFailure(error));
-    socket.on("close", () => this.onSocketFailure(new Error("Redis connection closed")));
+      this.socket = socket;
+      this.incoming = Buffer.alloc(0);
+      socket.on("data", (chunk) => this.onData(Buffer.from(chunk)));
+      socket.on("error", (error) => this.onSocketFailure(error));
+      socket.on("close", () => this.onSocketFailure(new Error("Redis connection closed")));
 
-    const password = decodeURIComponent(this.url.password || "");
-    const username = decodeURIComponent(this.url.username || "");
-    if (password) {
-      const auth = username ? await this.writeCommand(["AUTH", username, password]) : await this.writeCommand(["AUTH", password]);
-      if (auth !== "OK") throw new Error("Redis AUTH failed");
-    }
+      const password = decodeURIComponent(this.url.password || "");
+      const username = decodeURIComponent(this.url.username || "");
+      if (password) {
+        const auth = username ? await this.writeCommand(["AUTH", username, password]) : await this.writeCommand(["AUTH", password]);
+        if (auth !== "OK") throw new Error("Redis AUTH failed");
+      }
 
-    const dbText = this.url.pathname.replace(/^\//, "");
-    if (dbText) {
-      const db = Number(dbText);
-      if (!Number.isInteger(db) || db < 0) throw new Error(`Invalid Redis database index: ${dbText}`);
-      const selected = await this.writeCommand(["SELECT", db]);
-      if (selected !== "OK") throw new Error(`Redis SELECT ${db} failed`);
+      const dbText = this.url.pathname.replace(/^\//, "");
+      if (dbText) {
+        const db = Number(dbText);
+        if (!Number.isInteger(db) || db < 0) throw new Error(`Invalid Redis database index: ${dbText}`);
+        const selected = await this.writeCommand(["SELECT", db]);
+        if (selected !== "OK") throw new Error(`Redis SELECT ${db} failed`);
+      }
+    } catch (error) {
+      if (this.socket === socket) this.socket = null;
+      socket.destroy();
+      throw error;
     }
   }
 
@@ -167,10 +181,8 @@ export class RedisClient {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        const index = this.pending.findIndex((entry) => entry.resolve === wrappedResolve);
-        if (index >= 0) this.pending.splice(index, 1);
         reject(new Error(`Redis command timed out: ${parts[0]}`));
-        socket.destroy();
+        socket.destroy(new Error(`Redis command timed out: ${parts[0]}`));
       }, this.commandTimeoutMs);
 
       const wrappedResolve = (value: RedisValue) => {
