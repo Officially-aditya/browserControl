@@ -148,6 +148,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
       port: 8787,
       extensionToken: "extension-canary-device-token",
       mcpBearerToken: "extension-canary-token",
+      adminBearerToken: "extension-canary-admin-token",
       heartbeatIntervalMs: 2_000,
       heartbeatTimeoutMs: 8_000,
       tlsKey,
@@ -261,7 +262,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     if (gateway?.httpServer) await new Promise<void>((resolve) => gateway.httpServer.close(() => resolve()));
   });
 
-  it("captures the shared tab through chrome.debugger and executes an observation-bound click", async () => {
+  it("captures a scaled shared-tab overview and executes an observation-bound click", async () => {
     const status = await client.callTool({ name: "browser_status", arguments: {} });
     expect(status.isError).toBeFalsy();
     const statusPayload = JSON.parse((status.content[0] as any).text);
@@ -269,11 +270,16 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     expect(statusPayload.extension.attachedTabId).not.toBeNull();
     expect(statusPayload.extension.attachedTabId).toBeDefined();
 
-    const observation = await client.callTool({ name: "browser_observe", arguments: { format: "png" } });
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "png", maxLongEdge: 640 },
+    });
     expect(observation.isError).toBeFalsy();
     expect((observation.content[1] as any).type).toBe("image");
     const metadata = JSON.parse((observation.content[0] as any).text);
     expect(metadata.coordinateSpace).toBe("normalized_1000");
+    expect(Math.max(metadata.imageWidth, metadata.imageHeight)).toBeLessThanOrEqual(640);
+    expect(metadata.imageScale).toBeLessThan(1);
 
     const before = await controller.session.send("Runtime.evaluate", {
       expression: "JSON.stringify(window.__STATE__ || {clicks:0})",
@@ -294,5 +300,32 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     });
     const afterClicks = JSON.parse(after.result.value).clicks || 0;
     expect(afterClicks).toBeGreaterThan(beforeClicks);
+  });
+
+  it("rejects an observation after the page changes outside browserControl", async () => {
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
+    });
+    expect(observation.isError).toBeFalsy();
+    const metadata = JSON.parse((observation.content[0] as any).text);
+
+    await controller.session.send("Runtime.evaluate", {
+      expression: `(() => {
+        const marker = document.createElement("div");
+        marker.id = "external-change-marker";
+        marker.textContent = "changed outside browserControl";
+        document.body.appendChild(marker);
+      })()`,
+      returnByValue: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const staleClick = await client.callTool({
+      name: "browser_click",
+      arguments: { observationId: metadata.observationId, x: 68, y: 151, button: "left" },
+    });
+    expect(staleClick.isError).toBe(true);
+    expect((staleClick.content[0] as any).text).toContain("STALE_OBSERVATION");
   });
 });
