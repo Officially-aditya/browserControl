@@ -1,3 +1,5 @@
+import { getLoopbackHealthUrl, getReconnectDelay } from "./gateway-connection.js";
+
 const DEBUGGER_VERSION = "1.3";
 let socket = null;
 let attachedTabId = null;
@@ -5,6 +7,8 @@ let visualEpoch = 0;
 let paused = false;
 let manualDisconnect = false;
 let reconnectTimer = null;
+let reconnectAttempts = 0;
+let gatewayConnectInFlight = false;
 const observations = new Map();
 const MAX_OBSERVATIONS = 32;
 
@@ -364,55 +368,92 @@ function clearReconnectTimer() {
 
 async function connectGateway() {
   clearReconnectTimer();
-  if (manualDisconnect) return;
+  if (manualDisconnect || gatewayConnectInFlight) return;
   const config = await getConfig();
   if (!config.gatewayUrl) return;
   if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) return;
 
-  const url = new URL(config.gatewayUrl);
-  if (config.deviceToken) url.searchParams.set("token", config.deviceToken);
-  const currentSocket = new WebSocket(url.toString());
-  socket = currentSocket;
-
-  currentSocket.onopen = async () => {
-    if (socket !== currentSocket) return;
-    await setStatus(paused ? "paused" : "connected", { gatewayUrl: config.gatewayUrl });
-    if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
-      currentSocket.send(JSON.stringify({ type: "hello", version: 1, userAgent: navigator.userAgent }));
-    }
-  };
-
-  currentSocket.onmessage = async (event) => {
-    if (socket !== currentSocket) return;
-    let request;
-    try { request = JSON.parse(event.data); } catch { return; }
-    if (!request?.id || !request?.method) return;
+  gatewayConnectInFlight = true;
+  try {
+    let url;
     try {
-      const result = await handleRpc(request);
-      if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
-        currentSocket.send(JSON.stringify({ id: request.id, ok: true, result }));
-      }
+      url = new URL(config.gatewayUrl);
+      if (!["ws:", "wss:"].includes(url.protocol)) throw new Error("Gateway URL must use ws:// or wss://");
     } catch (error) {
-      if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
-        currentSocket.send(JSON.stringify({ id: request.id, ok: false, error: { code: error?.code || "RPC_ERROR", message: error?.message || String(error) } }));
+      await setStatus("error", { gatewayUrl: config.gatewayUrl, lastError: error.message });
+      return;
+    }
+
+    // A stopped local gateway otherwise produces a noisy browser WebSocket
+    // connection error on every retry. Probe the local health endpoint first;
+    // public WSS endpoints still use the direct WebSocket path.
+    const healthUrl = getLoopbackHealthUrl(config.gatewayUrl);
+    if (healthUrl) {
+      const probeController = new AbortController();
+      const probeTimer = setTimeout(() => probeController.abort(), 1500);
+      try {
+        const response = await fetch(healthUrl, { cache: "no-store", signal: probeController.signal });
+        if (!response.ok) throw new Error(`Gateway health check returned HTTP ${response.status}`);
+      } catch {
+        socket = null;
+        await setStatus("disconnected", { gatewayUrl: config.gatewayUrl });
+        if (!manualDisconnect && config.autoReconnect) {
+          const delay = getReconnectDelay(reconnectAttempts++);
+          reconnectTimer = setTimeout(() => void connectGateway(), delay);
+        }
+        return;
+      } finally {
+        clearTimeout(probeTimer);
       }
     }
-  };
 
-  currentSocket.onclose = async () => {
-    if (socket !== currentSocket) return;
-    socket = null;
-    await setStatus("disconnected");
-    const latestConfig = await getConfig();
-    if (!manualDisconnect && latestConfig.autoReconnect) {
-      clearReconnectTimer();
-      reconnectTimer = setTimeout(connectGateway, 2000);
-    }
-  };
+    if (config.deviceToken) url.searchParams.set("token", config.deviceToken);
+    const currentSocket = new WebSocket(url.toString());
+    socket = currentSocket;
 
-  currentSocket.onerror = () => {
-    if (socket === currentSocket) void setStatus("error");
-  };
+    currentSocket.onopen = async () => {
+      if (socket !== currentSocket) return;
+      reconnectAttempts = 0;
+      await setStatus(paused ? "paused" : "connected", { gatewayUrl: config.gatewayUrl, lastError: "" });
+      if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+        currentSocket.send(JSON.stringify({ type: "hello", version: 1, userAgent: navigator.userAgent }));
+      }
+    };
+
+    currentSocket.onmessage = async (event) => {
+      if (socket !== currentSocket) return;
+      let request;
+      try { request = JSON.parse(event.data); } catch { return; }
+      if (!request?.id || !request?.method) return;
+      try {
+        const result = await handleRpc(request);
+        if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+          currentSocket.send(JSON.stringify({ id: request.id, ok: true, result }));
+        }
+      } catch (error) {
+        if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+          currentSocket.send(JSON.stringify({ id: request.id, ok: false, error: { code: error?.code || "RPC_ERROR", message: error?.message || String(error) } }));
+        }
+      }
+    };
+
+    currentSocket.onclose = async () => {
+      if (socket !== currentSocket) return;
+      socket = null;
+      await setStatus("disconnected");
+      const latestConfig = await getConfig();
+      if (!manualDisconnect && latestConfig.autoReconnect) {
+        const delay = getReconnectDelay(reconnectAttempts++);
+        reconnectTimer = setTimeout(() => void connectGateway(), delay);
+      }
+    };
+
+    currentSocket.onerror = () => {
+      if (socket === currentSocket) void setStatus("disconnected");
+    };
+  } finally {
+    gatewayConnectInFlight = false;
+  }
 }
 
 async function replaceGatewayConnection() {

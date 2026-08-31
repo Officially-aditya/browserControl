@@ -19,19 +19,29 @@ async function openWebSocket(wsUrl: string): Promise<WebSocket> {
 
 async function sendCdp(wsUrl: string, method: string, params: any = {}): Promise<any> {
   const ws = await openWebSocket(wsUrl);
-  const id = Math.floor(Math.random() * 1_000_000) + 1;
-  const response = new Promise<any>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${method}`)), 5000);
-    ws.on("message", (raw) => {
-      const message = JSON.parse(raw.toString());
-      if (message.id !== id) return;
-      clearTimeout(timer);
-      if (message.error) reject(new Error(message.error.message));
-      else resolve(message.result);
+  let nextId = 1;
+  const call = (callMethod: string, callParams: any = {}) => {
+    const id = nextId++;
+    return new Promise<any>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${callMethod}`)), 5000);
+      const onMessage = (raw: WebSocket.RawData) => {
+        const message = JSON.parse(raw.toString());
+        if (message.id !== id) return;
+        clearTimeout(timer);
+        ws.off("message", onMessage);
+        if (message.error) reject(new Error(message.error.message));
+        else resolve(message.result);
+      };
+      ws.on("message", onMessage);
+      ws.send(JSON.stringify({ id, method: callMethod, params: callParams }));
     });
-  });
-  ws.send(JSON.stringify({ id, method, params }));
-  try { return await response; } finally { ws.close(); }
+  };
+  try {
+    if (method === "Runtime.evaluate") await call("Runtime.enable");
+    return await call(method, params);
+  } finally {
+    ws.close();
+  }
 }
 
 async function runtimeMessage(wsUrl: string, message: any): Promise<any> {
