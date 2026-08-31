@@ -16,6 +16,11 @@ export interface GatewayRuntimeHandle {
   stopHeartbeat: () => void;
 }
 
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "::";
+}
+
 export function installExtensionHeartbeat(
   wss: WebSocketServer,
   options: Pick<GatewayRuntimeOptions, "heartbeatIntervalMs" | "heartbeatTimeoutMs"> = {}
@@ -88,12 +93,16 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
 
   const publicHost = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
   const publicPort = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
+  const localPublicListener = isLoopbackHost(publicHost);
 
   // Keep the proven MCP/WebSocket gateway on a private ephemeral loopback port
-  // and put a transparent TLS terminator in front of it. This mirrors normal
-  // production deployment behind a TLS reverse proxy without duplicating MCP logic.
+  // and put a transparent TLS terminator in front of it. Static extension
+  // credentials remain available only when the public listener is itself local.
   const internalGateway = await runRemoteGateway({
     ...options,
+    extensionToken: localPublicListener
+      ? options.extensionToken
+      : "",
     host: "127.0.0.1",
     port: 0,
   });
