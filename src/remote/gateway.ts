@@ -359,7 +359,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         const webRequest = new Request(requestUrl, {
           method: req.method || "POST",
           headers,
-          body: body.length ? body : undefined,
+          body: body.length ? body.toString("utf8") : undefined,
         });
         const response = await mcpHandler.fetch(webRequest);
         await writeWebResponse(response, res);
