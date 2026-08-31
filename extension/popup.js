@@ -1,30 +1,14 @@
+import { getGatewayHttpUrl, getGatewayPermissionOrigin } from "./gateway-connection.js";
+
 const $ = (id) => document.getElementById(id);
 
 async function call(message) {
   return chrome.runtime.sendMessage(message);
 }
 
-function isLoopback(hostname) {
-  const value = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
-  return value === "localhost" || value === "127.0.0.1" || value === "::1";
-}
-
-function gatewayHttpUrl(gatewayValue, pathname) {
-  const url = new URL(gatewayValue);
-  if (!["ws:", "wss:"].includes(url.protocol)) throw new Error("Gateway must use ws:// or wss://");
-  if (url.protocol === "ws:" && !isLoopback(url.hostname)) {
-    throw new Error("Deployed gateways must use secure wss://");
-  }
-  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
-  url.pathname = pathname;
-  url.search = "";
-  url.hash = "";
-  return url;
-}
-
 async function requestGatewayPermission(gatewayValue) {
-  const httpUrl = gatewayHttpUrl(gatewayValue, "/health");
-  const origin = `${httpUrl.protocol}//${httpUrl.host}/*`;
+  const origin = getGatewayPermissionOrigin(gatewayValue);
+  if (!origin) throw new Error("Enter a valid ws:// or wss:// gateway URL");
   const granted = await chrome.permissions.request({ origins: [origin] });
   if (!granted) throw new Error("Gateway access was not granted");
 }
@@ -65,7 +49,7 @@ $("pair").addEventListener("click", async () => {
 
     setBusy(button, true, "Pairing…");
     await requestGatewayPermission(gatewayUrl);
-    const claimUrl = gatewayHttpUrl(gatewayUrl, "/pairing/claim");
+    const claimUrl = getGatewayHttpUrl(gatewayUrl, "/pairing/claim");
     const response = await fetch(claimUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
