@@ -155,6 +155,8 @@ export interface RemoteGatewayOptions {
   maxMcpBodySize?: number;
   trustProxy?: boolean;
   pairingAttemptsPerMinute?: number;
+  /** Internal runtimes can bind loopback without inheriting localhost trust semantics. */
+  allowLoopbackDevelopment?: boolean;
 }
 
 export interface RemoteGatewayHandle {
@@ -173,23 +175,24 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const port = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
   const host = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
   const loopback = isLoopbackHost(host);
+  const localDevelopment = loopback && (options.allowLoopbackDevelopment ?? true);
   const extensionToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
   const configuredMcpBearerToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
   const configuredAdminBearerToken = options.adminBearerToken ?? process.env.BROWSERCONTROL_ADMIN_TOKEN ?? "";
   const deviceStorePath = options.deviceStorePath ?? process.env.BROWSERCONTROL_DEVICE_STORE_PATH ?? "";
   const trustProxy = options.trustProxy ?? process.env.BROWSERCONTROL_TRUST_PROXY === "1";
 
-  if (!configuredAdminBearerToken && !loopback) {
-    throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the gateway is not bound to loopback");
+  if (!configuredAdminBearerToken && !localDevelopment) {
+    throw new Error("BROWSERCONTROL_ADMIN_TOKEN is required when the relay is not in loopback development mode");
   }
-  if (extensionToken && !loopback) {
-    throw new Error("BROWSERCONTROL_DEVICE_TOKEN is only supported for loopback development; deployed gateways must use revocable device pairing");
+  if (extensionToken && !localDevelopment) {
+    throw new Error("BROWSERCONTROL_DEVICE_TOKEN is only supported for loopback development; deployed relays must use revocable device pairing");
   }
-  if (configuredMcpBearerToken && !loopback) {
-    throw new Error("BROWSERCONTROL_MCP_TOKEN is only supported for loopback development; deployed gateways use device-scoped MCP credentials from pairing");
+  if (configuredMcpBearerToken && !localDevelopment) {
+    throw new Error("BROWSERCONTROL_MCP_TOKEN is only supported for loopback development; deployed relays use device-scoped MCP credentials from pairing");
   }
 
-  const mcpBearerToken = loopback ? (configuredMcpBearerToken || randomBytes(32).toString("base64url")) : "";
+  const mcpBearerToken = localDevelopment ? (configuredMcpBearerToken || randomBytes(32).toString("base64url")) : "";
   const adminBearerToken = configuredAdminBearerToken || randomBytes(32).toString("base64url");
   const maxMcpBodySize = options.maxMcpBodySize ?? 2 * 1024 * 1024;
   const deviceRegistry = options.deviceRegistry ?? (deviceStorePath ? await loadDeviceRegistry(deviceStorePath) : new DeviceRegistry());
@@ -200,7 +203,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const pairingGlobalLimiter = new FixedWindowRateLimiter(120, 60_000);
   const mcpLimiter = new FixedWindowRateLimiter(600, 60_000);
 
-  if (loopback && !configuredMcpBearerToken) {
+  if (localDevelopment && !configuredMcpBearerToken) {
     console.warn(`[browserControl] Generated temporary local MCP bearer token: ${mcpBearerToken}`);
   }
   if (!configuredAdminBearerToken) {
@@ -216,7 +219,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const authorizedAdminRequest = (req: http.IncomingMessage) => safeTokenEqual(bearerToken(req), adminBearerToken);
 
   const authenticateExtensionRequest = (token: string): DeviceIdentity | null => {
-    if (loopback && extensionToken && safeTokenEqual(token, extensionToken)) {
+    if (localDevelopment && (!extensionToken || safeTokenEqual(token, extensionToken))) {
       return { deviceId: LOCAL_DEVICE_ID, name: "Local development" };
     }
     return deviceRegistry.authenticateDevice(token);
@@ -226,7 +229,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     const token = bearerToken(req) || url.searchParams.get("token") || "";
     const device = deviceRegistry.authenticateMcp(token);
     if (device) return device;
-    if (loopback && mcpBearerToken && safeTokenEqual(token, mcpBearerToken)) {
+    if (localDevelopment && mcpBearerToken && safeTokenEqual(token, mcpBearerToken)) {
       return { deviceId: LOCAL_DEVICE_ID, name: "Local development", localDevelopment: true };
     }
     return null;
