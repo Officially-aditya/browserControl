@@ -1,5 +1,26 @@
 import { z } from "zod";
 
+const MAX_URL_LENGTH = 2048;
+const MAX_TYPE_TEXT = 5000;
+const MAX_KEYS = 10;
+const MAX_KEY_LENGTH = 50;
+const MAX_DRAG_POINTS = 50;
+
+function isHttpHttpsUrl(value: string): boolean {
+  if (typeof value !== "string" || value.length > MAX_URL_LENGTH || /[\x00-\x20]/.test(value)) return false;
+  try {
+    const protocol = new URL(value.trim()).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isHttpHttpsOrBlank(value: string | undefined): boolean {
+  if (value === undefined || value === "about:blank") return true;
+  return !!value && isHttpHttpsUrl(value);
+}
+
 /**
  * Single internal normalized coordinate system: 0-1000 across X and Y
  */
@@ -88,35 +109,35 @@ export const NormalizedScrollActionSchema = z.object({
   type: z.literal("scroll"),
   x: z.number().min(0).max(1000),
   y: z.number().min(0).max(1000),
-  deltaX: z.number().optional().default(0),
-  deltaY: z.number().optional().default(0),
-  modifiers: z.array(z.string()).optional(),
+  deltaX: z.number().min(-4000).max(4000).optional().default(0),
+  deltaY: z.number().min(-4000).max(4000).optional().default(0),
+  modifiers: z.array(z.string().max(MAX_KEY_LENGTH)).max(MAX_KEYS).optional(),
 });
 
 export const NormalizedDragActionSchema = z.object({
   type: z.literal("drag"),
-  path: z.array(NormalizedCoordinateSchema).min(2, "Drag path must have at least 2 points"),
-  modifiers: z.array(z.string()).optional(),
+  path: z.array(NormalizedCoordinateSchema).min(2, "Drag path must have at least 2 points").max(MAX_DRAG_POINTS),
+  modifiers: z.array(z.string().max(MAX_KEY_LENGTH)).max(MAX_KEYS).optional(),
 });
 
 export const NormalizedKeypressActionSchema = z.object({
   type: z.literal("keypress"),
-  keys: z.array(z.string()).min(1, "Keypress requires at least one key"),
+  keys: z.array(z.string().min(1).max(MAX_KEY_LENGTH)).min(1, "Keypress requires at least one key").max(MAX_KEYS),
 });
 
 export const NormalizedKeyDownActionSchema = z.object({
   type: z.literal("key_down"),
-  key: z.string(),
+  key: z.string().min(1).max(MAX_KEY_LENGTH),
 });
 
 export const NormalizedKeyUpActionSchema = z.object({
   type: z.literal("key_up"),
-  key: z.string(),
+  key: z.string().min(1).max(MAX_KEY_LENGTH),
 });
 
 export const NormalizedTypeActionSchema = z.object({
   type: z.literal("type"),
-  text: z.string(),
+  text: z.string().max(MAX_TYPE_TEXT),
   method: VisionTypingMethodSchema.optional().default("auto"),
 });
 
@@ -146,12 +167,16 @@ export type NormalizedComputerAction = z.infer<typeof NormalizedComputerActionSc
  */
 export const NormalizedNavigateActionSchema = z.object({
   type: z.literal("navigate"),
-  url: z.string().url("Valid URL required for navigation"),
+  url: z.string().max(MAX_URL_LENGTH).url("Valid URL required for navigation").refine(isHttpHttpsUrl, {
+    message: "Only http:// and https:// URLs are allowed",
+  }),
 });
 
 export const NormalizedNewTabActionSchema = z.object({
   type: z.literal("new_tab"),
-  url: z.string().optional().default("about:blank"),
+  url: z.string().max(MAX_URL_LENGTH).optional().default("about:blank").refine(isHttpHttpsOrBlank, {
+    message: "Only http://, https://, or about:blank URLs are allowed",
+  }),
 });
 
 export const NormalizedSwitchTabActionSchema = z.object({
@@ -179,7 +204,7 @@ export const NormalizedReloadActionSchema = z.object({
 export const NormalizedHandleDialogActionSchema = z.object({
   type: z.literal("handle_dialog"),
   accept: z.boolean(),
-  promptText: z.string().optional(),
+  promptText: z.string().max(MAX_TYPE_TEXT).optional(),
 });
 
 export const NormalizedTabsActionSchema = z.object({

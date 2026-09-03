@@ -70,20 +70,32 @@ export async function runHttpMcpServer(
   let authToken = securityOptions.authToken || process.env.MCP_AUTH_TOKEN;
   if (!authToken) {
     if (securityOptions.allowInsecureNoAuth || process.env.MCP_ALLOW_INSECURE_NO_AUTH === "true") {
+      // Insecure mode is loopback-dev only. Refuse on public binds.
+      const insecureHost = extractHostname(host);
+      const insecureLoopback =
+        insecureHost === "127.0.0.1" ||
+        insecureHost === "localhost" ||
+        insecureHost === "::1" ||
+        insecureHost === "::ffff:127.0.0.1";
+      if (!insecureLoopback) {
+        throw new Error("MCP_ALLOW_INSECURE_NO_AUTH is only permitted on loopback hosts (127.0.0.1/localhost/::1)");
+      }
       console.warn("[MCP-HTTP] Warning: Server running in insecure mode without authentication.");
     } else {
       authToken = randomBytes(32).toString("hex");
-      console.log(`[MCP-HTTP] Generated mandatory authentication token: ${authToken}`);
+      const fingerprint = authToken.slice(0, 8);
+      console.log(`[MCP-HTTP] Generated mandatory authentication token (fingerprint ${fingerprint}…). Set MCP_AUTH_TOKEN to persist it.`);
     }
   }
 
   // 2. Loopback Enforcement & Host validation list
+  // NOTE: "::" is NOT loopback (unspecified address). It must not grant trust.
   const normalizedHost = extractHostname(host);
   const isLoopback =
     normalizedHost === "127.0.0.1" ||
     normalizedHost === "localhost" ||
     normalizedHost === "::1" ||
-    normalizedHost === "::";
+    normalizedHost === "::ffff:127.0.0.1";
   if (!isLoopback) {
     console.warn(`[MCP-HTTP] Security Warning: Binding to non-loopback host (${host}). Ensure firewall rules are applied.`);
   }
@@ -156,9 +168,14 @@ export async function runHttpMcpServer(
     let originAllowed = false;
 
     if (enableCors && origin) {
-      if (allowedOriginsSet.has("*") || allowedOriginsSet.has(origin)) {
+      // "*" is never honored when Authorization is in use — it would let any
+      // website drive the browser with a stolen token. Require explicit origins.
+      if (allowedOriginsSet.has("*")) {
+        console.warn("[MCP-HTTP] Ignoring MCP_ALLOWED_ORIGINS=* while authentication is enabled. Configure explicit origins.");
+      } else if (allowedOriginsSet.has(origin)) {
         originAllowed = true;
         res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
         res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
@@ -318,9 +335,10 @@ export async function runHttpMcpServer(
               })
             );
           } catch (err: any) {
+            console.error("[MCP-HTTP] Request failed:", err);
             if (!res.headersSent) {
-              res.writeHead(500, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: `Internal MCP error: ${err.message}` }));
+              res.writeHead(500, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+              res.end(JSON.stringify({ error: "Internal error" }));
             }
           }
         });

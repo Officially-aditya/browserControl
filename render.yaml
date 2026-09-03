@@ -11,7 +11,10 @@ services:
       - key: BROWSERCONTROL_ADMIN_TOKEN
         generateValue: true
       - key: BROWSERCONTROL_TRUST_PROXY
-        value: "1"
+        value: "0"
+      # Set to "1" only if the Render proxy is confirmed to overwrite
+      # X-Forwarded-For for this service; otherwise clients can spoof the
+      # pairing/MCP per-IP rate-limit key (global pairing bucket still applies).
       # This blueprint is intentionally a single-replica default.
       # For restart-persistent pairing on one replica, attach a durable disk and set:
       # BROWSERCONTROL_DEVICE_STORE_PATH=/var/data/browsercontrol-devices.json

@@ -35,7 +35,14 @@ function bearerToken(request: http.IncomingMessage): string {
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "::";
+  // NOTE: "::" is the IPv6 unspecified address (equiv. 0.0.0.0), NOT loopback.
+  // Only ::1 (plus IPv4 loopback) grants local-development trust.
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "::ffff:127.0.0.1"
+  );
 }
 
 function requestAddress(request: http.IncomingMessage, trustProxy: boolean): string {
@@ -43,7 +50,10 @@ function requestAddress(request: http.IncomingMessage, trustProxy: boolean): str
     const forwarded = request.headers["x-forwarded-for"];
     const value = Array.isArray(forwarded) ? forwarded[0] : forwarded;
     const first = value?.split(",")[0]?.trim();
-    if (first) return first.slice(0, 128);
+    // Only accept plausible IP/host values to avoid log injection and
+    // trivial rate-limit key manipulation. Operators must only enable
+    // trustProxy behind a proxy that overwrites XFF.
+    if (first && /^[A-Za-z0-9.:_%-]{1,128}$/.test(first)) return first.slice(0, 128);
   }
   return request.socket.remoteAddress || "unknown";
 }
@@ -53,9 +63,20 @@ function writeJson(response: http.ServerResponse, status: number, value: unknown
     "Content-Type": "application/json",
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
     ...extraHeaders,
   });
   response.end(JSON.stringify(value));
+}
+
+function safeDecodeDeviceId(raw: string): string | null {
+  try {
+    const decoded = decodeURIComponent(raw);
+    if (!decoded || decoded.length > 256) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
 }
 
 async function readRawBody(request: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
@@ -142,10 +163,28 @@ function isBodyMethod(method: string): boolean {
 function normalizeInternalUrl(value: string): string {
   const url = new URL(value);
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error("BROWSERCONTROL_RELAY_INTERNAL_URL must use http:// or https://");
+  if (url.username || url.password) throw new Error("BROWSERCONTROL_RELAY_INTERNAL_URL must not contain credentials");
+  if (!url.hostname) throw new Error("BROWSERCONTROL_RELAY_INTERNAL_URL must include a hostname");
+  // Defense-in-depth: never allow cluster credentials to be sent to cloud metadata.
+  if (url.hostname === "169.254.169.254" || url.hostname === "[169.254.169.254]") {
+    throw new Error("BROWSERCONTROL_RELAY_INTERNAL_URL must not point at instance metadata");
+  }
   url.pathname = url.pathname.replace(/\/$/, "");
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function isAllowedForwardTarget(internalUrl: string): boolean {
+  try {
+    const url = new URL(internalUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (url.username || url.password) return false;
+    if (url.hostname === "169.254.169.254") return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 interface RoutedMcpPrincipal extends DeviceIdentity {
@@ -253,10 +292,10 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   let effectiveInternalUrl = configuredInternalUrl ? normalizeInternalUrl(configuredInternalUrl) : "";
 
   if (localDevelopment && !configuredMcpBearerToken) {
-    console.warn(`[browserControl] Generated temporary local MCP bearer token: ${mcpBearerToken}`);
+    console.warn(`[browserControl] Generated temporary local MCP bearer token (fingerprint ${mcpBearerToken.slice(0, 8)}…). Set BROWSERCONTROL_MCP_TOKEN to persist it.`);
   }
   if (!configuredAdminBearerToken) {
-    console.warn(`[browserControl] Generated temporary admin bearer token: ${adminBearerToken}`);
+    console.warn(`[browserControl] Generated temporary admin bearer token (fingerprint ${adminBearerToken.slice(0, 8)}…). Set BROWSERCONTROL_ADMIN_TOKEN to persist it.`);
   }
 
   const mcpHandler = createMcpHandler(({ requestInfo }) => {
@@ -278,8 +317,11 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     return null;
   };
 
-  const authenticateMcpRequest = async (req: http.IncomingMessage, url: URL): Promise<RoutedMcpPrincipal | null> => {
-    const token = bearerToken(req) || url.searchParams.get("token") || "";
+  const authenticateMcpRequest = async (req: http.IncomingMessage): Promise<RoutedMcpPrincipal | null> => {
+    // Header-only auth. Query-string tokens are intentionally not accepted:
+    // URLs persist in proxy/access logs, history, and connector configs.
+    const token = bearerToken(req);
+    if (!token) return null;
     const device = await relayState.authenticateMcp(token);
     if (device) return { ...device, token };
     if (localDevelopment && mcpBearerToken && safeTokenEqual(token, mcpBearerToken)) {
@@ -318,6 +360,9 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     headers: Headers,
     body: Buffer
   ): Promise<Response> => {
+    if (!isAllowedForwardTarget(presence.internalUrl)) {
+      throw Object.assign(new Error("Refusing to forward to untrusted relay origin"), { code: "UNTRUSTED_RELAY_ORIGIN" });
+    }
     const target = new URL("/internal/mcp", `${presence.internalUrl}/`);
     const forwarded = new Headers(headers);
     forwarded.set("Authorization", `Bearer ${clusterToken}`);
@@ -349,6 +394,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     const presence = await relayState.getPresence(deviceId);
     if (!presence) return false;
     if (presence.replicaId === replicaId) return disconnectLocalDevice(deviceId, 4003, reason);
+    if (!isAllowedForwardTarget(presence.internalUrl)) return false;
     try {
       const target = new URL("/internal/device/disconnect", `${presence.internalUrl}/`);
       const response = await fetch(target, {
@@ -384,9 +430,9 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   };
 
   const handleExternalMcp = async (req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> => {
-    const principal = await authenticateMcpRequest(req, url);
+    const principal = await authenticateMcpRequest(req);
     if (!principal) {
-      writeJson(res, 401, { error: "Unauthorized" });
+      writeJson(res, 401, { error: "Unauthorized: use Authorization: Bearer <mcpToken>" });
       req.resume();
       return;
     }
@@ -526,7 +572,11 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         req.resume();
         return;
       }
-      const deviceId = decodeURIComponent(rotateMatch[1]);
+      const deviceId = safeDecodeDeviceId(rotateMatch[1]);
+      if (!deviceId) {
+        writeJson(res, 400, { error: "Invalid device ID" });
+        return;
+      }
       const rotated = await relayState.rotateMcpToken(deviceId);
       if (!rotated) {
         writeJson(res, 404, { error: "Device not found" });
@@ -541,7 +591,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         writeJson(res, 401, { error: "Unauthorized" });
         return;
       }
-      const deviceId = decodeURIComponent(url.pathname.slice("/devices/".length));
+      const deviceId = safeDecodeDeviceId(url.pathname.slice("/devices/".length));
       if (!deviceId || !await relayState.revoke(deviceId)) {
         writeJson(res, 404, { error: "Device not found" });
         return;
@@ -566,11 +616,31 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         return;
       }
       const status = error?.code === "PAYLOAD_TOO_LARGE" ? 413 : error?.code === "INVALID_JSON" ? 400 : 500;
-      writeJson(res, status, { error: error?.message || "Relay request failed" });
+      if (status === 500) {
+        console.error("[browserControl] Relay request failed:", error);
+        writeJson(res, 500, { error: "Internal error" });
+      } else {
+        writeJson(res, status, { error: error?.message || "Relay request failed" });
+      }
     });
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const extensionTokenFromUpgrade = (request: http.IncomingMessage, url: URL): { token: string; via: string } => {
+    // Preferred: Sec-WebSocket-Protocol carries the bearer without touching URLs
+    // (browser WebSocket cannot set Authorization headers). The extension sends
+    // `new WebSocket(endpoint, ["browsercontrol.<token>"])` when available.
+    const protocols = request.headers["sec-websocket-protocol"];
+    const offered = (Array.isArray(protocols) ? protocols.join(",") : protocols || "").split(",").map((s) => s.trim()).filter(Boolean);
+    for (const proto of offered) {
+      const candidate = proto.startsWith("browsercontrol.") ? proto.slice("browsercontrol.".length) : proto;
+      if (candidate && candidate.length >= 16) return { token: candidate, via: "subprotocol" };
+    }
+    // Legacy fallback: ?token= query param. Supported for backwards compat but
+    // deprecated — URLs leak into logs. New extension versions use subprotocol.
+    return { token: url.searchParams.get("token") || "", via: "query" };
+  };
+
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
   const unregisterRevocation = localRegistry.onRevoked((deviceId) => {
     void disconnectLocalDevice(deviceId, 4003, "Device credential revoked");
   });
@@ -593,7 +663,24 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         socket.destroy();
         return;
       }
-      const identity = await authenticateExtensionRequest(url.searchParams.get("token") || "");
+      // Per-IP upgrade bucket stops unauthenticated flood/token-oracle attempts.
+      try {
+        const upgradeLimit = await relayState.consumeRateLimit(
+          "ws-upgrade",
+          requestAddress(request, trustProxy),
+          20,
+          60_000
+        );
+        if (!upgradeLimit.allowed) {
+          socket.write("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+      } catch {
+        // Fail open on rate-limiter errors; auth still applies below.
+      }
+      const { token: extensionTokenFromRequest } = extensionTokenFromUpgrade(request, url);
+      const identity = await authenticateExtensionRequest(extensionTokenFromRequest);
       if (!identity) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
@@ -602,7 +689,14 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
       wss.handleUpgrade(request, socket, head, (ws) => {
         void (async () => {
           const connectionId = randomUUID();
+          const previous = localConnections.get(identity.deviceId);
           deviceRouter.attach(identity.deviceId, ws);
+          // New physical connection invalidates any stale exclusive-control lease
+          // so a legitimate re-pair cannot be starved by the displaced holder.
+          deviceRouter.route(identity.deviceId).lease.clear();
+          if (previous && previous.socket !== ws && previous.socket.readyState === 1) {
+            try { previous.socket.close(4001, "Replaced by newer browserControl connection for this device"); } catch {}
+          }
           localConnections.set(identity.deviceId, { connectionId, socket: ws });
           if (clustered && identity.deviceId !== LOCAL_DEVICE_ID) {
             const presence: RelayPresence = {

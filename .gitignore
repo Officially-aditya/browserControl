@@ -5,3 +5,6 @@ screenshot*.png
 *.log
 coverage
 .browsercontrol.env
+.env
+*.env
+!.env.example

@@ -1,6 +1,7 @@
 import { ChromeConnection } from "../chrome/connection.js";
 import { TargetManager } from "../chrome/targets.js";
 import { TabSession } from "../chrome/session.js";
+import { assertSafeNewTabUrl } from "./safe-url.js";
 import { TabInfo, WindowInfo } from "../protocol/results.js";
 
 export class TabController {
@@ -22,10 +23,11 @@ export class TabController {
   }
 
   /**
-   * Create a new tab and optionally attach to it
+   * Create a new tab and optionally attach to it. Only http/https/about:blank.
    */
   public async newTab(url = "about:blank", autoSwitch = true): Promise<{ targetId: string }> {
-    const targetId = await this.targetManager.createTab(url);
+    const safeUrl = assertSafeNewTabUrl(url);
+    const targetId = await this.targetManager.createTab(safeUrl);
     if (autoSwitch) {
       await this.switchTab(targetId);
     }
@@ -105,11 +107,13 @@ export class TabController {
   }
 
   /**
-   * Create a new browser window using Target.createTarget({ newWindow: true })
+   * Create a new browser window using Target.createTarget({ newWindow: true }).
+   * Only http/https/about:blank.
    */
   public async newWindow(url = "about:blank"): Promise<{ targetId: string; windowId?: number }> {
+    const safeUrl = assertSafeNewTabUrl(url);
     const res = await this.connection.send<{ targetId: string }>("Target.createTarget", {
-      url,
+      url: safeUrl,
       newWindow: true,
     });
 

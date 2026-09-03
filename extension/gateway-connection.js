@@ -16,10 +16,9 @@ export function getGatewayHttpUrl(gatewayUrl, pathname = "/") {
   return url;
 }
 
-export function getGatewayMcpUrl(gatewayUrl, mcpToken) {
-  if (!mcpToken) return "";
+export function getGatewayMcpUrl(gatewayUrl) {
   const url = getGatewayHttpUrl(gatewayUrl, "/mcp");
-  url.searchParams.set("token", mcpToken);
+  // Auth is header-only (Authorization: Bearer). Never embed tokens in URLs.
   return url.toString();
 }
 

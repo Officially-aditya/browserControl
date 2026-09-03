@@ -289,6 +289,7 @@ async function mouseClick(params, clickCount = 1) {
 async function drag(params) {
   const record = assertFresh(params.observationId);
   if (!Array.isArray(params.path) || params.path.length < 2) throw new Error("drag path requires at least two points");
+  if (params.path.length > 50) throw new Error("drag path must have at most 50 points");
   const points = params.path.map((point) => normalizedPointToSource(point.x, point.y, record));
   const first = points[0];
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: first.x, y: first.y, button: "none" });
@@ -304,15 +305,21 @@ async function drag(params) {
 
 async function scroll(params) {
   const record = assertFresh(params.observationId);
+  const deltaX = Number(params.deltaX || 0);
+  const deltaY = Number(params.deltaY || 0);
+  if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) throw new Error("scroll deltas must be finite numbers");
+  if (Math.abs(deltaX) > 4000 || Math.abs(deltaY) > 4000) throw new Error("scroll deltas must be within ±4000");
   const p = normalizedPointToSource(params.x ?? 500, params.y ?? 500, record);
-  await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: params.deltaX || 0, deltaY: params.deltaY || 0 });
+  await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX, deltaY });
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
 
 async function typeText(params) {
   assertFresh(params.observationId);
-  await send("Input.insertText", { text: String(params.text ?? "") });
+  const text = String(params.text ?? "");
+  if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
+  await send("Input.insertText", { text });
   invalidateVisualState();
   return { success: true, visualEpoch };
 }
@@ -326,12 +333,35 @@ async function keypress(params) {
   return { success: true, visualEpoch };
 }
 
+function assertSafeNavigationUrl(rawUrl) {
+  const url = String(rawUrl || "").trim();
+  if (!url || url.length > 2048 || /[\x00-\x20]/.test(url)) {
+    throw new Error("Blocked unsafe navigation URL (only http/https allowed)");
+  }
+  let protocol = "";
+  try {
+    protocol = new URL(url).protocol;
+  } catch {
+    throw new Error("Blocked unsafe navigation URL (only http/https allowed)");
+  }
+  if (protocol !== "http:" && protocol !== "https:") {
+    throw new Error(`Blocked navigation to ${protocol} (only http/https allowed)`);
+  }
+  return url;
+}
+
+function assertSafeNewTabUrl(rawUrl) {
+  if (rawUrl == null || rawUrl === "" || rawUrl === "about:blank") return "about:blank";
+  return assertSafeNavigationUrl(rawUrl);
+}
+
 async function navigate(params) {
   assertFresh(params.observationId);
   if (!params.url) throw new Error("url is required");
-  await send("Page.navigate", { url: params.url });
+  const safeUrl = assertSafeNavigationUrl(params.url);
+  await send("Page.navigate", { url: safeUrl });
   invalidateVisualState();
-  return { success: true, visualEpoch, url: params.url };
+  return { success: true, visualEpoch, url: safeUrl };
 }
 
 async function historyAction(params, direction) {
@@ -368,7 +398,8 @@ async function switchTab(params) {
 
 async function newTab(params = {}) {
   assertFresh(params.observationId);
-  const tab = await chrome.tabs.create({ url: params.url || "about:blank", active: true });
+  const safeUrl = assertSafeNewTabUrl(params.url);
+  const tab = await chrome.tabs.create({ url: safeUrl, active: true });
   if (!tab.id) throw new Error("Failed to create tab");
   await attach(tab.id);
   return { success: true, targetId: String(tab.id), visualEpoch };
@@ -468,8 +499,11 @@ async function connectGateway() {
       }
     }
 
+    // Auth: prefer Sec-WebSocket-Protocol bearer (URLs leak into logs).
+    // Query param kept for backwards compat with older relays.
     if (config.deviceToken) url.searchParams.set("token", config.deviceToken);
-    const currentSocket = new WebSocket(url.toString());
+    const subprotocols = config.deviceToken ? [`browsercontrol.${config.deviceToken}`] : [];
+    const currentSocket = new WebSocket(url.toString(), subprotocols);
     socket = currentSocket;
 
     currentSocket.onopen = async () => {

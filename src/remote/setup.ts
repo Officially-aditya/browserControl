@@ -35,7 +35,8 @@ export async function setupRemoteGateway(outputPath = path.resolve(process.cwd()
   console.log(`  Local development device token: ${deviceToken}`);
   console.log("");
   console.log("Local MCP endpoint:");
-  console.log(`  http://127.0.0.1:8787/mcp?token=${encodeURIComponent(mcpToken)}`);
+  console.log("  http://127.0.0.1:8787/mcp");
+  console.log(`  Use header: Authorization: Bearer ${mcpToken}`);
   console.log("");
   console.log("Admin API bearer token:");
   console.log(`  ${adminToken}`);

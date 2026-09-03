@@ -24,9 +24,8 @@ describe("extension gateway connection helpers", () => {
   });
 
   it("builds a device-scoped remote MCP connector URL", () => {
-    expect(getGatewayMcpUrl("wss://relay.example.com/extension", "device-mcp-secret"))
-      .toBe("https://relay.example.com/mcp?token=device-mcp-secret");
-    expect(getGatewayMcpUrl("wss://relay.example.com/extension", "")).toBe("");
+    expect(getGatewayMcpUrl("wss://relay.example.com/extension"))
+      .toBe("https://relay.example.com/mcp");
   });
 
   it("builds valid port-agnostic optional permission origins", () => {

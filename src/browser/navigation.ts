@@ -1,4 +1,5 @@
 import { TabSession } from "../chrome/session.js";
+import { assertSafeNavigationUrl } from "./safe-url.js";
 
 export class NavigationController {
   private session: TabSession;
@@ -8,12 +9,12 @@ export class NavigationController {
   }
 
   /**
-   * Navigate to a given URL and optionally wait for load event
+   * Navigate to a given URL and optionally wait for load event.
+   * Only http/https URLs are permitted; all other schemes are blocked
+   * below the model to prevent local-file exfiltration and escapes.
    */
   public async navigate(url: string, waitForLoad = true, timeoutMs = 20000): Promise<void> {
-    if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("file://") && !url.startsWith("about:")) {
-      url = "https://" + url;
-    }
+    url = assertSafeNavigationUrl(url);
 
     if (!waitForLoad) {
       await this.session.send("Page.navigate", { url });

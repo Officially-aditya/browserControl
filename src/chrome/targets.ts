@@ -1,4 +1,5 @@
 import { ChromeConnection } from "./connection.js";
+import { assertSafeNewTabUrl } from "../browser/safe-url.js";
 import { TabInfo } from "../protocol/results.js";
 
 export interface TargetInfo {
@@ -97,10 +98,11 @@ export class TargetManager {
   }
 
   /**
-   * Create a new browser tab
+   * Create a new browser tab. Only http/https/about:blank are permitted.
    */
   public async createTab(url = "about:blank"): Promise<string> {
-    const res = await this.connection.send<{ targetId: string }>("Target.createTarget", { url });
+    const safeUrl = assertSafeNewTabUrl(url);
+    const res = await this.connection.send<{ targetId: string }>("Target.createTarget", { url: safeUrl });
     return res.targetId;
   }
 

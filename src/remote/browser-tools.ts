@@ -1,5 +1,6 @@
 import { Server, type Tool } from "@modelcontextprotocol/server";
 import type { DeviceRoute } from "./device-router.js";
+import { assertSafeNavigationUrl, assertSafeNewTabUrl } from "../browser/safe-url.js";
 
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false } as const;
 const OBSERVATION_SCHEMA = {
@@ -89,6 +90,7 @@ export function browserTools(): Tool[] {
           path: {
             type: "array",
             minItems: 2,
+            maxItems: 50,
             items: {
               type: "object",
               properties: {
@@ -113,24 +115,24 @@ export function browserTools(): Tool[] {
           observationId: { type: "string" },
           x: { type: "number", minimum: 0, maximum: 1000, default: 500 },
           y: { type: "number", minimum: 0, maximum: 1000, default: 500 },
-          deltaX: { type: "number", default: 0 },
-          deltaY: { type: "number" },
+          deltaX: { type: "number", minimum: -4000, maximum: 4000, default: 0 },
+          deltaY: { type: "number", minimum: -4000, maximum: 4000 },
         },
         required: ["observationId", "deltaY"],
         additionalProperties: false,
       },
     },
-    { name: "browser_type", description: "Insert text into the focused element only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string" } }, required: ["observationId", "text"], additionalProperties: false } },
-    { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, items: { type: "string" } } }, required: ["observationId", "keys"], additionalProperties: false } },
-    { name: "browser_navigate", description: "Navigate the currently shared tab to an absolute URL from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri" } }, required: ["observationId", "url"], additionalProperties: false } },
+    { name: "browser_type", description: "Insert text into the focused element only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
+    { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
+    { name: "browser_navigate", description: "Navigate the currently shared tab to an http(s) URL from a fresh observation. Only http:// and https:// are allowed.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["observationId", "url"], additionalProperties: false } },
     { name: "browser_back", description: "Navigate backward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
     { name: "browser_forward", description: "Navigate forward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
     { name: "browser_reload", description: "Reload the shared tab from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
     { name: "browser_tabs", description: "List Chrome tabs visible to this routed browserControl device. Read-only.", inputSchema: EMPTY_SCHEMA },
-    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string" } }, required: ["observationId", "targetId"], additionalProperties: false } },
-    { name: "browser_new_tab", description: "Create a new tab from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri" } }, required: ["observationId"], additionalProperties: false } },
-    { name: "browser_close_tab", description: "Close a tab from a fresh observation. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string" } }, required: ["observationId"], additionalProperties: false } },
-    { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, accept: { type: "boolean" }, promptText: { type: "string" } }, required: ["observationId", "accept"], additionalProperties: false } },
+    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string", maxLength: 128 } }, required: ["observationId", "targetId"], additionalProperties: false } },
+    { name: "browser_new_tab", description: "Create a new tab from a fresh observation. Only http://, https://, or about:blank.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["observationId"], additionalProperties: false } },
+    { name: "browser_close_tab", description: "Close a tab from a fresh observation. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string", maxLength: 128 } }, required: ["observationId"], additionalProperties: false } },
+    { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, accept: { type: "boolean" }, promptText: { type: "string", maxLength: 5000 } }, required: ["observationId", "accept"], additionalProperties: false } },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the routed device.", inputSchema: EMPTY_SCHEMA },
   ];
 }
@@ -139,11 +141,54 @@ export function createDeviceMcpServer(route: DeviceRoute, clientId: string): Ser
   const server = new Server({ name: "browser-control-remote", version: "0.6.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler("tools/list", async () => ({ tools: browserTools() }));
 
+  // Server-side policy enforced below the model (works for any LLM client,
+  // including Claude). Blocks unsafe schemes even if a prompt-injected model
+  // requests them, and caps input sizes to protect the extension/CDP pipe.
+  const assertAllowedCall = (method: string, args: Record<string, any>): Record<string, any> => {
+    const next = { ...args };
+    if (method === "navigate") {
+      if (typeof next.url !== "string") throw Object.assign(new Error("url is required"), { code: "UNSAFE_NAVIGATION_URL" });
+      next.url = assertSafeNavigationUrl(next.url);
+    } else if (method === "new_tab") {
+      next.url = assertSafeNewTabUrl(typeof next.url === "string" ? next.url : undefined);
+    } else if (method === "type") {
+      if (typeof next.text === "string" && next.text.length > 5000) {
+        throw Object.assign(new Error("type text must be at most 5000 characters"), { code: "INPUT_TOO_LARGE" });
+      }
+    } else if (method === "keypress") {
+      if (Array.isArray(next.keys)) {
+        if (next.keys.length > 10) throw Object.assign(new Error("keys must have at most 10 entries"), { code: "INPUT_TOO_LARGE" });
+        for (const key of next.keys) {
+          if (typeof key !== "string" || key.length > 50) {
+            throw Object.assign(new Error("each key must be at most 50 characters"), { code: "INPUT_TOO_LARGE" });
+          }
+        }
+      }
+    } else if (method === "drag") {
+      if (Array.isArray(next.path) && next.path.length > 50) {
+        throw Object.assign(new Error("drag path must have at most 50 points"), { code: "INPUT_TOO_LARGE" });
+      }
+    } else if (method === "scroll") {
+      for (const field of ["deltaX", "deltaY"] as const) {
+        const value = next[field] ?? 0;
+        if (typeof value === "number" && Math.abs(value) > 4000) {
+          throw Object.assign(new Error(`${field} must be within ±4000`), { code: "INPUT_TOO_LARGE" });
+        }
+      }
+    } else if (method === "handle_dialog") {
+      if (typeof next.promptText === "string" && next.promptText.length > 5000) {
+        throw Object.assign(new Error("promptText must be at most 5000 characters"), { code: "INPUT_TOO_LARGE" });
+      }
+    }
+    return next;
+  };
+
   const mutate = async (method: string, params: Record<string, any>) => {
+    const safeParams = assertAllowedCall(method, params);
     if (!route.lease.acquire(clientId)) {
       throw Object.assign(new Error("Another AI client currently controls this browser. Try again after its lease expires or is released."), { code: "DEVICE_BUSY" });
     }
-    return route.bridge.call(method, params);
+    return route.bridge.call(method, safeParams);
   };
 
   server.setRequestHandler("tools/call", async (request: any) => {

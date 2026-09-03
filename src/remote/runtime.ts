@@ -18,7 +18,13 @@ export interface GatewayRuntimeHandle {
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "::";
+  // "::" is unspecified (public dual-stack), not loopback. See gateway.ts.
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "::ffff:127.0.0.1"
+  );
 }
 
 export function installExtensionHeartbeat(

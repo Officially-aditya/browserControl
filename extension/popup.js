@@ -23,8 +23,11 @@ function setBusy(button, busy, label) {
 }
 
 function refreshConnector(state) {
-  const connectorUrl = state.mcpToken && state.gatewayUrl ? getGatewayMcpUrl(state.gatewayUrl, state.mcpToken) : "";
+  const hasPairing = !!(state.mcpToken && state.gatewayUrl);
+  const connectorUrl = hasPairing ? getGatewayMcpUrl(state.gatewayUrl) : "";
   $("connector").value = connectorUrl;
+  const tokenEl = $("connectorToken");
+  if (tokenEl) tokenEl.value = hasPairing ? state.mcpToken : "";
   $("connectorSection").hidden = !connectorUrl;
 }
 

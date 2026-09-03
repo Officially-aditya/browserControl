@@ -1,5 +1,27 @@
 import { z } from "zod";
 
+const MAX_URL_LENGTH = 2048;
+const MAX_TYPE_TEXT = 5000;
+const MAX_KEYS = 10;
+const MAX_KEY_LENGTH = 50;
+const MAX_DRAG_POINTS = 50;
+const MAX_WAIT_MS = 30_000;
+
+function isHttpHttpsUrl(value: string): boolean {
+  if (value.length > MAX_URL_LENGTH || /[\x00-\x20]/.test(value)) return false;
+  try {
+    const protocol = new URL(value.trim()).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isHttpHttpsOrBlank(value: string | undefined): boolean {
+  if (value === undefined || value === "about:blank") return true;
+  return !!value && isHttpHttpsUrl(value);
+}
+
 export const CoordinateSchema = z.object({
   x: z.number().describe("X coordinate in screenshot image pixels"),
   y: z.number().describe("Y coordinate in screenshot image pixels"),
@@ -67,36 +89,36 @@ export const ScrollActionSchema = z.object({
   observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
   x: z.number(),
   y: z.number(),
-  deltaX: z.number().optional().default(0),
-  deltaY: z.number().optional().default(0),
-  modifiers: z.array(z.string()).optional(),
+  deltaX: z.number().min(-4000).max(4000).optional().default(0),
+  deltaY: z.number().min(-4000).max(4000).optional().default(0),
+  modifiers: z.array(z.string().max(MAX_KEY_LENGTH)).max(MAX_KEYS).optional(),
 });
 
 export const DragActionSchema = z.object({
   type: z.literal("drag"),
   observationId: z.string().describe("The observationId of the screenshot this action was planned against"),
-  path: z.array(CoordinateSchema).min(2, "Drag path must have at least 2 points (start and end)"),
-  modifiers: z.array(z.string()).optional(),
+  path: z.array(CoordinateSchema).min(2, "Drag path must have at least 2 points (start and end)").max(MAX_DRAG_POINTS),
+  modifiers: z.array(z.string().max(MAX_KEY_LENGTH)).max(MAX_KEYS).optional(),
 });
 
 export const KeypressActionSchema = z.object({
   type: z.literal("keypress"),
-  keys: z.array(z.string()).min(1, "Keypress requires at least one key"),
+  keys: z.array(z.string().min(1).max(MAX_KEY_LENGTH)).min(1, "Keypress requires at least one key").max(MAX_KEYS),
 });
 
 export const KeyDownActionSchema = z.object({
   type: z.literal("key_down"),
-  key: z.string(),
+  key: z.string().min(1).max(MAX_KEY_LENGTH),
 });
 
 export const KeyUpActionSchema = z.object({
   type: z.literal("key_up"),
-  key: z.string(),
+  key: z.string().min(1).max(MAX_KEY_LENGTH),
 });
 
 export const TypeActionSchema = z.object({
   type: z.literal("type"),
-  text: z.string(),
+  text: z.string().max(MAX_TYPE_TEXT),
   method: TypingMethodSchema.optional().default("auto"),
 });
 
@@ -106,7 +128,7 @@ export const ResetInputActionSchema = z.object({
 
 export const WaitActionSchema = z.object({
   type: z.literal("wait"),
-  ms: z.number().nonnegative(),
+  ms: z.number().nonnegative().max(MAX_WAIT_MS),
 });
 
 export const ComputerActionSchema = z.discriminatedUnion("type", [
@@ -130,12 +152,16 @@ export type ComputerAction = z.infer<typeof ComputerActionSchema>;
 
 export const NavigateActionSchema = z.object({
   type: z.literal("navigate"),
-  url: z.string().url("Must be a valid URL"),
+  url: z.string().max(MAX_URL_LENGTH).url("Must be a valid URL").refine(isHttpHttpsUrl, {
+    message: "Only http:// and https:// URLs are allowed",
+  }),
 });
 
 export const NewTabActionSchema = z.object({
   type: z.literal("new_tab"),
-  url: z.string().url().optional(),
+  url: z.string().max(MAX_URL_LENGTH).url().optional().refine(isHttpHttpsOrBlank, {
+    message: "Only http://, https://, or about:blank URLs are allowed",
+  }),
 });
 
 export const SwitchTabActionSchema = z.object({
@@ -170,7 +196,9 @@ export const ListWindowsActionSchema = z.object({
 
 export const NewWindowActionSchema = z.object({
   type: z.literal("new_window"),
-  url: z.string().url().optional(),
+  url: z.string().max(MAX_URL_LENGTH).url().optional().refine(isHttpHttpsOrBlank, {
+    message: "Only http://, https://, or about:blank URLs are allowed",
+  }),
 });
 
 export const ActivateWindowActionSchema = z.object({
@@ -190,7 +218,7 @@ export const DialogStateActionSchema = z.object({
 export const HandleDialogActionSchema = z.object({
   type: z.literal("handle_dialog"),
   accept: z.boolean(),
-  promptText: z.string().optional(),
+  promptText: z.string().max(MAX_TYPE_TEXT).optional(),
 });
 
 export const BrowserActionSchema = z.discriminatedUnion("type", [
