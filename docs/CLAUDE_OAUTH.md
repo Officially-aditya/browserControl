@@ -19,14 +19,8 @@ Users do not need to know the relay WebSocket URL, admin token, pairing code, de
 The unpacked production extension uses the managed browserControl relay directly:
 
 ```text
-WSS: https://browsercontrol-relay-production.up.railway.app/extension
+WSS: wss://browsercontrol-relay-production.up.railway.app/extension
 MCP: https://browsercontrol-relay-production.up.railway.app/mcp
-```
-
-The WebSocket endpoint is stored internally as:
-
-```text
-wss://browsercontrol-relay-production.up.railway.app/extension
 ```
 
 Many extensions/users connect to the same endpoint. The relay routes each connection by its independently issued `deviceId` and device credential.
