@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { ControlLease, type BrowserRoute } from "../browser-control/bridge.js";
 import { createBrowserControlMcpServer } from "../browser-control/tools.js";
