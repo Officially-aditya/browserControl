@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import type { DeviceIdentity } from "./device-auth.js";
 import type { RelayDeviceRecord, RelayState } from "./relay-state.js";
@@ -14,12 +14,17 @@ const CLIENT_TTL_MS = 180 * 24 * 60 * 60_000;
 const AUTH_CODE_TTL_MS = 5 * 60_000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60_000;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60_000;
+const GRANT_TTL_MS = 365 * 24 * 60 * 60_000;
 const ENROLLMENT_TTL_MS = 60_000;
+const DEVICE_APPROVAL_TTL_MS = 2 * 60_000;
 const MAX_OAUTH_BODY_BYTES = 64 * 1024;
 const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const ENROLLMENT_HEADER = "x-browsercontrol-enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
 const REVERSE_DOMAIN_NATIVE_SCHEME = /^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/i;
+const APPROVAL_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const APPROVAL_CODE_PATTERN = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{20,128}$/;
 
 type OAuthClientRecord = {
   clientId: string;
@@ -37,6 +42,7 @@ type OAuthAuthorizationCodeRecord = {
   scope: string;
   resource: string;
   codeChallenge: string;
+  grantId?: string;
   expiresAt: number;
 };
 
@@ -46,6 +52,46 @@ type OAuthTokenRecord = {
   deviceVersion: number;
   scope: string;
   resource: string;
+  grantId?: string;
+  expiresAt: number;
+};
+
+type OAuthGrantRecord = {
+  grantId: string;
+  clientId: string;
+  clientName: string;
+  deviceId: string;
+  deviceVersion: number;
+  scope: string;
+  resource: string;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+};
+
+type OAuthGrantIndexRecord = {
+  grantIds: string[];
+};
+
+type PendingDeviceApprovalRecord = {
+  requestId: string;
+  approvalCode: string;
+  clientId: string;
+  clientName: string;
+  redirectUri: string;
+  state: string;
+  scope: string;
+  resource: string;
+  codeChallenge: string;
+  createdAt: number;
+  expiresAt: number;
+  status: "pending" | "approved" | "denied";
+  deviceId?: string;
+  deviceVersion?: number;
+};
+
+type ApprovalCodeRecord = {
+  requestId: string;
   expiresAt: number;
 };
 
@@ -89,6 +135,16 @@ function deviceVersion(device: RelayDeviceRecord): number {
 
 function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString("base64url");
+}
+
+function randomApprovalCode(): string {
+  let code = "";
+  for (let index = 0; index < 8; index++) code += APPROVAL_ALPHABET[randomInt(APPROVAL_ALPHABET.length)];
+  return code;
+}
+
+function normalizeApprovalCode(value: string): string {
+  return value.toUpperCase().replace(/[\s-]/g, "");
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -136,7 +192,13 @@ function writeJson(
   response.end(JSON.stringify(value));
 }
 
-function writeHtml(response: http.ServerResponse, status: number, html: string, redirectUri?: string): void {
+function writeHtml(
+  response: http.ServerResponse,
+  status: number,
+  html: string,
+  redirectUri?: string,
+  extraHeaders: Record<string, string> = {}
+): void {
   response.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
@@ -144,6 +206,7 @@ function writeHtml(response: http.ServerResponse, status: number, html: string, 
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${authorizationFormAction(redirectUri)}; base-uri 'none'; frame-ancestors 'none'`,
+    ...extraHeaders,
   });
   response.end(html);
 }
@@ -288,6 +351,11 @@ function requestAddress(request: http.IncomingMessage): string {
   return request.socket.remoteAddress || "unknown";
 }
 
+function bearerToken(request: http.IncomingMessage): string {
+  const raw = request.headers.authorization || "";
+  return raw.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+}
+
 function enrollmentRequest(request: http.IncomingMessage): boolean {
   const raw = request.headers[ENROLLMENT_HEADER];
   const value = Array.isArray(raw) ? raw[0] : raw;
@@ -350,6 +418,13 @@ export class RelayOAuthService {
       await this.state.delete("access", token).catch(() => undefined);
       return null;
     }
+    if (record.grantId) {
+      const grant = await this.state.get<OAuthGrantRecord>("grant", record.grantId);
+      if (!grant || !this.grantMatches(grant, record.clientId, device)) {
+        await this.state.delete("access", token).catch(() => undefined);
+        return null;
+      }
+    }
     return { deviceId: device.deviceId, name: device.name, clientId: record.clientId };
   }
 
@@ -367,6 +442,31 @@ export class RelayOAuthService {
 
     if (pathname === "/enroll/claim" && request.method === "POST") {
       await this.handleEnrollmentClaim(request, response);
+      return true;
+    }
+
+    if (pathname === "/device-approvals/lookup" && request.method === "POST") {
+      await this.handleDeviceApprovalLookup(request, response);
+      return true;
+    }
+
+    if (pathname === "/device-approvals/decision" && request.method === "POST") {
+      await this.handleDeviceApprovalDecision(request, response);
+      return true;
+    }
+
+    if (pathname === "/device-approvals/grants" && request.method === "GET") {
+      await this.handleListDeviceGrants(request, response);
+      return true;
+    }
+
+    if (pathname === "/device-approvals/grants/revoke" && request.method === "POST") {
+      await this.handleRevokeDeviceGrant(request, response);
+      return true;
+    }
+
+    if (pathname === "/authorize/device-status" && request.method === "GET") {
+      await this.handleDeviceApprovalStatus(response, url.searchParams);
       return true;
     }
 
@@ -409,7 +509,7 @@ export class RelayOAuthService {
     }
 
     if ((pathname === "/authorize" || pathname === "/oauth/authorize") && request.method === "GET") {
-      await this.handleAuthorizeGet(response, url.searchParams);
+      await this.handleAuthorizeGet(request, response, url.searchParams);
       return true;
     }
 
@@ -428,6 +528,80 @@ export class RelayOAuthService {
 
   public async close(): Promise<void> {
     if (this.ownsState) await this.state.close();
+  }
+
+  private async authenticateDeviceRequest(request: http.IncomingMessage): Promise<DeviceIdentity | null> {
+    return this.relayState.authenticateDevice(bearerToken(request));
+  }
+
+  private grantMatches(grant: OAuthGrantRecord, clientId: string, device: RelayDeviceRecord): boolean {
+    return (
+      grant.expiresAt > Date.now() &&
+      grant.clientId === clientId &&
+      grant.deviceId === device.deviceId &&
+      grant.deviceVersion === deviceVersion(device) &&
+      grant.scope === BROWSER_SCOPE &&
+      grant.resource === this.resourceUrl
+    );
+  }
+
+  private async grantIndex(deviceId: string): Promise<OAuthGrantIndexRecord> {
+    return await this.state.get<OAuthGrantIndexRecord>("grant_index", deviceId) ?? { grantIds: [] };
+  }
+
+  private async storeGrantIndex(deviceId: string, grantIds: string[]): Promise<void> {
+    await this.state.put("grant_index", deviceId, { grantIds: [...new Set(grantIds)].slice(-100) }, GRANT_TTL_MS);
+  }
+
+  private async createGrant(
+    client: OAuthClientRecord,
+    device: RelayDeviceRecord,
+    scope: string,
+    resource: string
+  ): Promise<OAuthGrantRecord> {
+    const index = await this.grantIndex(device.deviceId);
+    const retained: string[] = [];
+    for (const grantId of index.grantIds) {
+      const existing = await this.state.get<OAuthGrantRecord>("grant", grantId);
+      if (!existing) continue;
+      if (existing.clientId === client.clientId) {
+        await this.state.delete("grant", grantId);
+        continue;
+      }
+      retained.push(grantId);
+    }
+
+    const now = Date.now();
+    const grant: OAuthGrantRecord = {
+      grantId: `grant_${randomToken(24)}`,
+      clientId: client.clientId,
+      clientName: client.clientName,
+      deviceId: device.deviceId,
+      deviceVersion: deviceVersion(device),
+      scope,
+      resource,
+      createdAt: now,
+      lastUsedAt: now,
+      expiresAt: now + GRANT_TTL_MS,
+    };
+    await Promise.all([
+      this.state.put("grant", grant.grantId, grant, GRANT_TTL_MS),
+      this.storeGrantIndex(device.deviceId, [...retained, grant.grantId]),
+    ]);
+    return grant;
+  }
+
+  private async touchGrant(grant: OAuthGrantRecord): Promise<void> {
+    const now = Date.now();
+    const updated: OAuthGrantRecord = {
+      ...grant,
+      lastUsedAt: now,
+      expiresAt: now + GRANT_TTL_MS,
+    };
+    await Promise.all([
+      this.state.put("grant", updated.grantId, updated, GRANT_TTL_MS),
+      this.grantIndex(updated.deviceId).then((index) => this.storeGrantIndex(updated.deviceId, [...index.grantIds, updated.grantId])),
+    ]);
   }
 
   private async handleEnrollmentStart(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -614,8 +788,8 @@ export class RelayOAuthService {
     }
 
     const clientName = typeof body.client_name === "string"
-      ? body.client_name.trim().slice(0, 120) || "Claude MCP client"
-      : "Claude MCP client";
+      ? body.client_name.trim().slice(0, 120) || "MCP client"
+      : "MCP client";
     const clientId = `bc_${randomToken(24)}`;
     const createdAt = Date.now();
     const client: OAuthClientRecord = {
@@ -674,13 +848,350 @@ export class RelayOAuthService {
     return { client, clientId, redirectUri, state, scope, resource, codeChallenge };
   }
 
-  private async handleAuthorizeGet(response: http.ServerResponse, params: URLSearchParams): Promise<void> {
+  private async handleAuthorizeGet(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    params: URLSearchParams
+  ): Promise<void> {
     const validated = await this.validateAuthorization(params);
     if (!validated) {
       writeHtml(response, 400, this.authorizationPage(null, "Invalid or unsupported OAuth authorization request."));
       return;
     }
+
+    if (isNativePrivateUseRedirect(validated.redirectUri)) {
+      const address = requestAddress(request);
+      const [perAddress, global] = await Promise.all([
+        this.relayState.consumeRateLimit("oauth-device-approval-start-ip", address, 20, 10 * 60_000),
+        this.relayState.consumeRateLimit("oauth-device-approval-start-global", "global", 600, 60_000),
+      ]);
+      if (!perAddress.allowed || !global.allowed) {
+        writeHtml(response, 429, this.authorizationPage(validated, "Too many device authorization attempts. Try again shortly."), validated.redirectUri);
+        return;
+      }
+      const pending = await this.createPendingDeviceApproval(validated);
+      writeHtml(response, 200, this.deviceApprovalPage(pending), validated.redirectUri, {
+        Refresh: `2; url=/authorize/device-status?request_id=${encodeURIComponent(pending.requestId)}`,
+      });
+      return;
+    }
+
     writeHtml(response, 200, this.authorizationPage(validated), validated.redirectUri);
+  }
+
+  private async createPendingDeviceApproval(
+    validated: NonNullable<Awaited<ReturnType<RelayOAuthService["validateAuthorization"]>>>
+  ): Promise<PendingDeviceApprovalRecord> {
+    const requestId = randomToken(24);
+    let approvalCode = "";
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const candidate = randomApprovalCode();
+      if (!await this.state.get<ApprovalCodeRecord>("approval_code", candidate)) {
+        approvalCode = candidate;
+        break;
+      }
+    }
+    if (!approvalCode) throw new Error("Could not allocate a device approval code");
+
+    const createdAt = Date.now();
+    const expiresAt = createdAt + DEVICE_APPROVAL_TTL_MS;
+    const pending: PendingDeviceApprovalRecord = {
+      requestId,
+      approvalCode,
+      clientId: validated.clientId,
+      clientName: validated.client.clientName,
+      redirectUri: validated.redirectUri,
+      state: validated.state,
+      scope: validated.scope,
+      resource: validated.resource,
+      codeChallenge: validated.codeChallenge,
+      createdAt,
+      expiresAt,
+      status: "pending",
+    };
+    await Promise.all([
+      this.state.put("approval", requestId, pending, DEVICE_APPROVAL_TTL_MS),
+      this.state.put<ApprovalCodeRecord>("approval_code", approvalCode, { requestId, expiresAt }, DEVICE_APPROVAL_TTL_MS),
+    ]);
+    return pending;
+  }
+
+  private deviceApprovalPage(pending: PendingDeviceApprovalRecord, message = ""): string {
+    const callback = new URL(pending.redirectUri);
+    const callbackLabel = callback.protocol;
+    const code = htmlEscape(pending.approvalCode);
+    return `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="2;url=/authorize/device-status?request_id=${encodeURIComponent(pending.requestId)}">
+<title>Connect browserControl</title>
+<style>body{font:15px system-ui,sans-serif;max-width:520px;margin:56px auto;padding:0 20px;color:#1f1f1f}h1{font-size:24px}.card{border:1px solid #ddd;border-radius:12px;padding:18px}.muted{color:#666;font-size:13px;line-height:1.5}.code{font:700 28px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:4px;padding:12px 14px;background:#f3f3f3;border-radius:10px;text-align:center;margin:16px 0}.warning{color:#9a3412;background:#fff7ed;padding:10px;border-radius:8px}.ok{color:#137333;background:#e7f4ea;padding:10px;border-radius:8px}a{color:#111}</style>
+</head><body><h1>Connect browserControl</h1>
+<div class="card">
+<p><strong>${htmlEscape(pending.clientName)}</strong> is requesting access to one of your browserControl Chrome devices.</p>
+<p class="muted">Native callback: <code>${htmlEscape(callbackLabel)}</code><br>Requested access: view and control browser tabs through <code>${BROWSER_SCOPE}</code>.</p>
+<div id="approval-code" class="code">${code}</div>
+<p><strong>On the Mac whose Chrome you want to connect:</strong></p>
+<ol class="muted"><li>Open the browserControl extension.</li><li>Under Remote agents, choose <strong>Approve app connection</strong>.</li><li>Enter the code above.</li><li>Verify the app name and callback, then press <strong>Allow</strong>.</li></ol>
+<p class="warning">Do not share this code. It expires in about two minutes and can authorize only one browser device.</p>
+${message ? `<p class="ok">${htmlEscape(message)}</p>` : ""}
+<p class="muted">This page checks automatically. <a href="/authorize/device-status?request_id=${encodeURIComponent(pending.requestId)}">Check now</a>.</p>
+</div></body></html>`;
+  }
+
+  private async handleDeviceApprovalStatus(response: http.ServerResponse, params: URLSearchParams): Promise<void> {
+    const requestId = params.get("request_id") || "";
+    if (!REQUEST_ID_PATTERN.test(requestId)) {
+      writeHtml(response, 400, this.simplePage("Invalid approval request", "Restart the browserControl connector flow from your app."));
+      return;
+    }
+
+    const current = await this.state.get<PendingDeviceApprovalRecord>("approval", requestId);
+    if (!current || current.expiresAt <= Date.now()) {
+      writeHtml(response, 410, this.simplePage("Approval expired", "Return to your app and start the browserControl connection again."));
+      return;
+    }
+
+    if (current.status === "pending") {
+      writeHtml(response, 200, this.deviceApprovalPage(current), current.redirectUri, {
+        Refresh: `2; url=/authorize/device-status?request_id=${encodeURIComponent(current.requestId)}`,
+      });
+      return;
+    }
+
+    const pending = await this.state.take<PendingDeviceApprovalRecord>("approval", requestId);
+    if (!pending) {
+      writeHtml(response, 410, this.simplePage("Approval already completed", "Return to your app to continue."));
+      return;
+    }
+    await this.state.delete("approval_code", pending.approvalCode).catch(() => undefined);
+
+    const callback = new URL(pending.redirectUri);
+    if (pending.status === "denied") {
+      callback.searchParams.set("error", "access_denied");
+      if (pending.state) callback.searchParams.set("state", pending.state);
+      callback.searchParams.set("iss", this.issuer);
+      redirect(response, callback.toString(), 303);
+      return;
+    }
+
+    const device = pending.deviceId ? await this.relayState.getDevice(pending.deviceId) : null;
+    if (
+      !device ||
+      device.revokedAt ||
+      pending.deviceVersion == null ||
+      deviceVersion(device) !== pending.deviceVersion
+    ) {
+      callback.searchParams.set("error", "access_denied");
+      callback.searchParams.set("error_description", "The approved browser device is no longer valid");
+      if (pending.state) callback.searchParams.set("state", pending.state);
+      callback.searchParams.set("iss", this.issuer);
+      redirect(response, callback.toString(), 303);
+      return;
+    }
+
+    const client = await this.state.get<OAuthClientRecord>("client", pending.clientId);
+    if (!client) {
+      callback.searchParams.set("error", "access_denied");
+      callback.searchParams.set("error_description", "The OAuth client registration expired");
+      if (pending.state) callback.searchParams.set("state", pending.state);
+      callback.searchParams.set("iss", this.issuer);
+      redirect(response, callback.toString(), 303);
+      return;
+    }
+
+    const grant = await this.createGrant(client, device, pending.scope, pending.resource);
+    const code = randomToken(32);
+    const record: OAuthAuthorizationCodeRecord = {
+      clientId: pending.clientId,
+      redirectUri: pending.redirectUri,
+      deviceId: device.deviceId,
+      deviceVersion: deviceVersion(device),
+      scope: pending.scope,
+      resource: pending.resource,
+      codeChallenge: pending.codeChallenge,
+      grantId: grant.grantId,
+      expiresAt: Date.now() + AUTH_CODE_TTL_MS,
+    };
+    await this.state.put("code", code, record, AUTH_CODE_TTL_MS);
+
+    callback.searchParams.set("code", code);
+    if (pending.state) callback.searchParams.set("state", pending.state);
+    callback.searchParams.set("iss", this.issuer);
+    redirect(response, callback.toString(), 303);
+  }
+
+  private async handleDeviceApprovalLookup(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const identity = await this.authenticateDeviceRequest(request);
+    if (!identity) {
+      writeJson(response, 401, { error: "Unauthorized device" });
+      request.resume();
+      return;
+    }
+    const limit = await this.relayState.consumeRateLimit("oauth-device-approval-lookup", identity.deviceId, 12, 60_000);
+    if (!limit.allowed) {
+      writeJson(response, 429, { error: "Too many approval-code attempts" }, { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) });
+      request.resume();
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request);
+    } catch {
+      writeJson(response, 400, { error: "Invalid approval lookup payload" });
+      return;
+    }
+    const code = normalizeApprovalCode(typeof body.code === "string" ? body.code : "");
+    if (!APPROVAL_CODE_PATTERN.test(code)) {
+      writeJson(response, 400, { error: "Approval code must be 8 characters" });
+      return;
+    }
+
+    const codeRecord = await this.state.get<ApprovalCodeRecord>("approval_code", code);
+    const pending = codeRecord ? await this.state.get<PendingDeviceApprovalRecord>("approval", codeRecord.requestId) : null;
+    if (!codeRecord || !pending || pending.expiresAt <= Date.now() || pending.status !== "pending") {
+      writeJson(response, 404, { error: "Approval code is invalid, expired, or already used" });
+      return;
+    }
+
+    const callback = new URL(pending.redirectUri);
+    writeJson(response, 200, {
+      requestId: pending.requestId,
+      clientName: pending.clientName,
+      callback: callback.protocol,
+      scope: pending.scope,
+      expiresAt: pending.expiresAt,
+    });
+  }
+
+  private async handleDeviceApprovalDecision(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const identity = await this.authenticateDeviceRequest(request);
+    if (!identity) {
+      writeJson(response, 401, { error: "Unauthorized device" });
+      request.resume();
+      return;
+    }
+    const limit = await this.relayState.consumeRateLimit("oauth-device-approval-decision", identity.deviceId, 12, 60_000);
+    if (!limit.allowed) {
+      writeJson(response, 429, { error: "Too many approval decisions" }, { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) });
+      request.resume();
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request);
+    } catch {
+      writeJson(response, 400, { error: "Invalid approval decision payload" });
+      return;
+    }
+    const code = normalizeApprovalCode(typeof body.code === "string" ? body.code : "");
+    const requestId = typeof body.requestId === "string" ? body.requestId : "";
+    const decision = body.decision === "approve" ? "approve" : body.decision === "deny" ? "deny" : "";
+    if (!APPROVAL_CODE_PATTERN.test(code) || !REQUEST_ID_PATTERN.test(requestId) || !decision) {
+      writeJson(response, 400, { error: "Invalid approval decision" });
+      return;
+    }
+
+    const codeRecord = await this.state.take<ApprovalCodeRecord>("approval_code", code);
+    if (!codeRecord || codeRecord.requestId !== requestId || codeRecord.expiresAt <= Date.now()) {
+      writeJson(response, 409, { error: "Approval code is invalid, expired, or already claimed" });
+      return;
+    }
+    const pending = await this.state.get<PendingDeviceApprovalRecord>("approval", requestId);
+    if (!pending || pending.expiresAt <= Date.now() || pending.status !== "pending") {
+      writeJson(response, 409, { error: "Approval request is no longer pending" });
+      return;
+    }
+
+    const device = await this.relayState.getDevice(identity.deviceId);
+    if (!device || device.revokedAt) {
+      writeJson(response, 403, { error: "This browserControl device is revoked" });
+      return;
+    }
+
+    const remaining = Math.max(1, pending.expiresAt - Date.now());
+    const updated: PendingDeviceApprovalRecord = decision === "approve"
+      ? {
+          ...pending,
+          status: "approved",
+          deviceId: device.deviceId,
+          deviceVersion: deviceVersion(device),
+        }
+      : { ...pending, status: "denied" };
+    await this.state.put("approval", requestId, updated, remaining);
+    writeJson(response, 200, {
+      success: true,
+      decision,
+      requestId,
+      deviceId: decision === "approve" ? device.deviceId : undefined,
+    });
+  }
+
+  private async handleListDeviceGrants(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const identity = await this.authenticateDeviceRequest(request);
+    if (!identity) {
+      writeJson(response, 401, { error: "Unauthorized device" });
+      return;
+    }
+    const device = await this.relayState.getDevice(identity.deviceId);
+    if (!device || device.revokedAt) {
+      writeJson(response, 403, { error: "This browserControl device is revoked" });
+      return;
+    }
+
+    const index = await this.grantIndex(device.deviceId);
+    const grants: OAuthGrantRecord[] = [];
+    const retained: string[] = [];
+    for (const grantId of index.grantIds) {
+      const grant = await this.state.get<OAuthGrantRecord>("grant", grantId);
+      if (!grant || !this.grantMatches(grant, grant.clientId, device)) continue;
+      retained.push(grantId);
+      grants.push(grant);
+    }
+    if (retained.length !== index.grantIds.length) await this.storeGrantIndex(device.deviceId, retained);
+    grants.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+    writeJson(response, 200, {
+      grants: grants.map((grant) => ({
+        grantId: grant.grantId,
+        clientName: grant.clientName,
+        clientId: grant.clientId,
+        scope: grant.scope,
+        createdAt: grant.createdAt,
+        lastUsedAt: grant.lastUsedAt,
+        expiresAt: grant.expiresAt,
+      })),
+    });
+  }
+
+  private async handleRevokeDeviceGrant(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const identity = await this.authenticateDeviceRequest(request);
+    if (!identity) {
+      writeJson(response, 401, { error: "Unauthorized device" });
+      request.resume();
+      return;
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request);
+    } catch {
+      writeJson(response, 400, { error: "Invalid grant revocation payload" });
+      return;
+    }
+    const grantId = typeof body.grantId === "string" ? body.grantId : "";
+    if (!/^grant_[A-Za-z0-9_-]{20,128}$/.test(grantId)) {
+      writeJson(response, 400, { error: "Invalid grant ID" });
+      return;
+    }
+    const grant = await this.state.get<OAuthGrantRecord>("grant", grantId);
+    if (!grant || grant.deviceId !== identity.deviceId) {
+      writeJson(response, 404, { error: "Grant not found for this browser device" });
+      return;
+    }
+    await this.state.delete("grant", grantId);
+    const index = await this.grantIndex(identity.deviceId);
+    await this.storeGrantIndex(identity.deviceId, index.grantIds.filter((value) => value !== grantId));
+    writeJson(response, 200, { success: true, grantId });
   }
 
   private async handleAuthorizePost(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -695,6 +1206,11 @@ export class RelayOAuthService {
     const validated = await this.validateAuthorization(form);
     if (!validated) {
       writeHtml(response, 400, this.authorizationPage(null, "Invalid or expired OAuth authorization request."));
+      return;
+    }
+
+    if (isNativePrivateUseRedirect(validated.redirectUri)) {
+      writeHtml(response, 400, this.authorizationPage(validated, "Native apps must complete authorization through the short-lived device approval flow."), validated.redirectUri);
       return;
     }
 
@@ -715,6 +1231,7 @@ export class RelayOAuthService {
       return;
     }
 
+    const grant = await this.createGrant(validated.client, device, validated.scope, validated.resource);
     const code = randomToken(32);
     const expiresAt = Date.now() + AUTH_CODE_TTL_MS;
     const record: OAuthAuthorizationCodeRecord = {
@@ -725,6 +1242,7 @@ export class RelayOAuthService {
       scope: validated.scope,
       resource: validated.resource,
       codeChallenge: validated.codeChallenge,
+      grantId: grant.grantId,
       expiresAt,
     };
     await this.state.put("code", code, record, AUTH_CODE_TTL_MS);
@@ -756,7 +1274,7 @@ export class RelayOAuthService {
     const redirectTarget = redirectUrl ? (redirectUrl.host || redirectUrl.protocol) : "unknown client";
     const clientName = validated?.client.clientName || "Unknown MCP client";
     const loopbackWarning = redirectUrl && isLoopbackHostname(redirectUrl.hostname)
-      ? "<p class=\"warning\">This client redirects to your local computer. Only continue if you deliberately started a local Claude/Inspector login.</p>"
+      ? "<p class=\"warning\">This client redirects to your local computer. Only continue if you deliberately started a local MCP login.</p>"
       : "";
     const nativeWarning = validated?.client.applicationType === "native" && redirectUrl?.protocol !== "http:"
       ? `<p class="muted">After approval, browserControl will return to the native app through <code>${htmlEscape(redirectUrl?.protocol || "")}</code>.</p>`
@@ -772,11 +1290,15 @@ export class RelayOAuthService {
 ${loopbackWarning}${nativeWarning}${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}
 ${validated ? `<form method="post" action="/authorize">${hidden}
 <label for="device_token"><strong>Device verification</strong></label>
-<p class="muted">If the browserControl extension is connected, it verifies this device automatically. Otherwise provide the device MCP credential from a trusted development client.</p>
+<p class="muted">If the browserControl extension is connected in this Chrome, it verifies this device automatically. Otherwise provide the device MCP credential only from a trusted development client.</p>
 <input id="device_token" name="device_token" type="password" autocomplete="off" required autofocus>
 <div class="row"><button type="submit" name="decision" value="deny">Deny</button><button class="primary" type="submit" name="decision" value="approve">Authorize</button></div>
 </form>` : "<p>Return to your MCP client and restart the connector authorization flow.</p>"}
-</div><p class="muted">Only approve this page if you started the connection from Claude or another MCP client you trust.</p></body></html>`;
+</div><p class="muted">Only approve this page if you started the connection from an MCP client you trust.</p></body></html>`;
+  }
+
+  private simplePage(title: string, message: string): string {
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(title)}</title><style>body{font:15px system-ui,sans-serif;max-width:520px;margin:64px auto;padding:0 20px;color:#1f1f1f}.card{border:1px solid #ddd;border-radius:12px;padding:18px}.muted{color:#666}</style></head><body><h1>${htmlEscape(title)}</h1><div class="card"><p class="muted">${htmlEscape(message)}</p></div></body></html>`;
   }
 
   private async handleToken(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -821,13 +1343,18 @@ ${validated ? `<form method="post" action="/authorize">${hidden}
         oauthError(response, 400, "invalid_grant", "The paired browser credential was revoked or rotated");
         return;
       }
+
+      let grant = record.grantId ? await this.state.get<OAuthGrantRecord>("grant", record.grantId) : null;
+      if (grant && !this.grantMatches(grant, clientId, device)) grant = null;
+      if (!grant) grant = await this.createGrant(client, device, record.scope, record.resource);
       await this.issueTokens(response, {
         clientId,
         deviceId: record.deviceId,
         deviceVersion: record.deviceVersion,
         scope: record.scope,
         resource: record.resource,
-      });
+        grantId: grant.grantId,
+      }, grant);
       return;
     }
 
@@ -843,13 +1370,21 @@ ${validated ? `<form method="post" action="/authorize">${hidden}
         oauthError(response, 400, "invalid_grant", "The paired browser credential was revoked or rotated");
         return;
       }
+
+      let grant = record.grantId ? await this.state.get<OAuthGrantRecord>("grant", record.grantId) : null;
+      if (record.grantId && (!grant || !this.grantMatches(grant, clientId, device))) {
+        oauthError(response, 400, "invalid_grant", "This browserControl authorization was revoked or expired");
+        return;
+      }
+      if (!grant) grant = await this.createGrant(client, device, record.scope, record.resource);
       await this.issueTokens(response, {
         clientId,
         deviceId: record.deviceId,
         deviceVersion: record.deviceVersion,
         scope: record.scope,
         resource: record.resource,
-      });
+        grantId: grant.grantId,
+      }, grant);
       return;
     }
 
@@ -858,8 +1393,10 @@ ${validated ? `<form method="post" action="/authorize">${hidden}
 
   private async issueTokens(
     response: http.ServerResponse,
-    base: Omit<OAuthTokenRecord, "expiresAt">
+    base: Omit<OAuthTokenRecord, "expiresAt">,
+    grant?: OAuthGrantRecord
   ): Promise<void> {
+    if (grant) await this.touchGrant(grant);
     const accessToken = randomToken(32);
     const refreshToken = randomToken(32);
     const accessRecord: OAuthTokenRecord = {
