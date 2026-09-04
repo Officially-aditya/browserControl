@@ -5,35 +5,40 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>browserControl</title>
   <style>
-    body{font:13px system-ui,sans-serif;width:340px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}button{padding:9px 11px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}button:disabled{opacity:.55;cursor:default}.row{display:flex;gap:8px;margin-top:12px}.status{padding:10px 11px;border-radius:8px;background:#f3f3f3;margin-bottom:10px;line-height:1.4}.muted{color:#666;font-size:11px;margin-top:8px;line-height:1.45}.grow{flex:1}.section{border-top:1px solid #eee;margin-top:14px;padding-top:12px}.error{color:#b3261e;font-size:11px;margin-top:8px;min-height:15px}.setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 0}.setting input{width:auto}.connected{color:#137333}
+    body{font:13px system-ui,sans-serif;width:340px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}button{padding:9px 11px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}button:disabled{opacity:.55;cursor:default}.row{display:flex;gap:8px;margin-top:12px}.status{padding:10px 11px;border-radius:8px;background:#f3f3f3;margin-bottom:10px;line-height:1.5}.muted{color:#666;font-size:11px;margin-top:8px;line-height:1.45}.grow{flex:1}.section{border-top:1px solid #eee;margin-top:14px;padding-top:12px}.section:first-of-type{border-top:0;margin-top:0}.error{color:#b3261e;font-size:11px;margin-top:8px;min-height:15px}.setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 0}.setting input{width:auto}.connected{color:#137333}.mode{display:flex;justify-content:space-between;align-items:center;padding:4px 0}.mode strong{font-size:12px}.pill{font-size:11px;padding:2px 7px;border-radius:999px;background:#eee}.pill.on{background:#e7f4ea;color:#137333}
   </style>
 </head>
 <body>
   <h1>browserControl</h1>
   <div id="status" class="status">Loading…</div>
 
-  <div id="connectSection">
-    <button id="connect" class="primary grow" style="width:100%">Connect browserControl</button>
-    <div class="muted">One click securely enrolls this Chrome profile. No relay URL, admin token, pairing code, or device token is required.</div>
+  <div class="section">
+    <div class="mode"><strong>Local agents</strong><span id="localState" class="pill">Checking</span></div>
+    <div class="muted">Run browserControl locally from OpenCode, Codex, Claude Code, or another stdio MCP client. Browser traffic goes directly between the local process and this extension.</div>
+    <button id="probeLocal" style="width:100%;margin-top:9px">Check local connection</button>
   </div>
 
-  <div id="connectedSection" hidden>
-    <div class="section">
-      <div class="setting"><span>Auto-use active tab</span><input id="autoAttach" type="checkbox" /></div>
-      <div class="setting"><span>Follow active tab</span><input id="followActiveTab" type="checkbox" /></div>
-      <div class="muted">The first browser request uses the active web tab automatically. Control detaches after inactivity and can always be paused locally.</div>
+  <div class="section">
+    <div class="mode"><strong>Remote agents</strong><span id="remoteState" class="pill">Off</span></div>
+    <div id="remoteConnectSection">
+      <button id="connect" class="primary grow" style="width:100%;margin-top:8px">Enable remote access</button>
+      <div class="muted">Enroll this Chrome profile only when a hosted agent needs access. Local agents do not use the relay.</div>
     </div>
-
-    <div class="section">
-      <button id="copyConnector" class="grow" style="width:100%">Copy Claude connector URL</button>
-      <div class="muted">Add this URL to Claude once. During OAuth, browserControl verifies this Chrome profile automatically—no MCP secret needs to be copied.</div>
+    <div id="remoteConnectedSection" hidden>
+      <button id="copyConnector" class="grow" style="width:100%;margin-top:8px">Copy remote MCP URL</button>
+      <div class="row"><button id="disconnect" class="grow">Disable remote access</button></div>
     </div>
-
-    <div class="row"><button id="pause" class="grow">Pause</button><button id="disconnect" class="grow">Disconnect</button></div>
   </div>
 
+  <div class="section">
+    <div class="setting"><span>Auto-use active tab</span><input id="autoAttach" type="checkbox" /></div>
+    <div class="setting"><span>Follow active tab</span><input id="followActiveTab" type="checkbox" /></div>
+    <div class="muted">Both local and remote agents use the same browser-control rules. Local interactive actions take precedence if both transports are active.</div>
+  </div>
+
+  <div class="row"><button id="pause" class="grow">Pause</button></div>
   <div id="error" class="error"></div>
-  <div class="muted">Only normal http/https tabs are controlled. Pause or disconnect locally at any time.</div>
+  <div class="muted">Only normal http/https tabs are controlled. Pause locally at any time.</div>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

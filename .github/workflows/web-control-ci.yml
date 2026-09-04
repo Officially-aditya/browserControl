@@ -51,6 +51,7 @@ jobs:
           node --check extension/service-worker.js
           node --check extension/popup.js
           node --check extension/gateway-connection.js
+          node --check extension/local-connection.js
           node --check extension/oauth-bridge.js
           if [ -f extension/keyboard.js ]; then node --check extension/keyboard.js; fi
       - run: npm run build
@@ -59,6 +60,8 @@ jobs:
       - run: npm run test:web
       - name: Extension unit tests
         run: npx vitest run tests/extension
+      - name: Real Chrome extension → local MCP bridge canary
+        run: xvfb-run -a npx vitest run tests/integration/extension_local.integration.test.ts
       - name: Generate throwaway localhost TLS certificate
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes \
