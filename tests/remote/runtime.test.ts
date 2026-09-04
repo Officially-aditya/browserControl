@@ -1,9 +1,52 @@
+import net from "node:net";
 import { describe, expect, it } from "vitest";
-import { runGatewayRuntime } from "../../src/remote/runtime.js";
+import {
+  installPublicExtensionUpgradeHardening,
+  runGatewayRuntime,
+} from "../../src/remote/runtime.js";
 
 const tls = { tlsKey: "test-key", tlsCert: "test-cert" };
 
 describe("gateway runtime public-listener security", () => {
+  it("strips legacy extension query credentials on public listeners", () => {
+    const server = net.createServer();
+    const stop = installPublicExtensionUpgradeHardening(server, true);
+    const request = {
+      url: "/extension?token=leaky-device-secret&keep=1",
+      headers: { host: "relay.example" },
+    } as any;
+
+    server.emit("upgrade", request, {} as any, Buffer.alloc(0));
+    expect(request.url).toBe("/extension?keep=1");
+    stop();
+  });
+
+  it("keeps the legacy query shape untouched when public hardening is disabled for loopback", () => {
+    const server = net.createServer();
+    const stop = installPublicExtensionUpgradeHardening(server, false);
+    const request = {
+      url: "/extension?token=local-development-secret",
+      headers: { host: "127.0.0.1" },
+    } as any;
+
+    server.emit("upgrade", request, {} as any, Buffer.alloc(0));
+    expect(request.url).toBe("/extension?token=local-development-secret");
+    stop();
+  });
+
+  it("does not alter unrelated public upgrade query parameters", () => {
+    const server = net.createServer();
+    const stop = installPublicExtensionUpgradeHardening(server, true);
+    const request = {
+      url: "/extension?trace=1",
+      headers: { host: "relay.example" },
+    } as any;
+
+    server.emit("upgrade", request, {} as any, Buffer.alloc(0));
+    expect(request.url).toBe("/extension?trace=1");
+    stop();
+  });
+
   it("requires an admin token before exposing a public TLS relay", async () => {
     await expect(runGatewayRuntime({ host: "0.0.0.0", ...tls }))
       .rejects.toThrow(/BROWSERCONTROL_ADMIN_TOKEN/);

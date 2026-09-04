@@ -27,6 +27,31 @@ function isLoopbackHost(host: string): boolean {
   );
 }
 
+/**
+ * The gateway still understands the historical /extension?token=... shape for
+ * loopback compatibility. Public runtimes deliberately erase that credential
+ * before the gateway's upgrade listener sees the request, so production WSS
+ * authentication can only come from the Sec-WebSocket-Protocol credential.
+ */
+export function installPublicExtensionUpgradeHardening(server: net.Server, enabled = true): () => void {
+  if (!enabled) return () => undefined;
+
+  const onUpgrade = (request: any) => {
+    try {
+      const url = new URL(request.url || "/", `http://${request.headers?.host || "localhost"}`);
+      if (url.pathname !== "/extension" || !url.searchParams.has("token")) return;
+      url.searchParams.delete("token");
+      const search = url.searchParams.toString();
+      request.url = `${url.pathname}${search ? `?${search}` : ""}`;
+    } catch {
+      // Invalid upgrade targets are rejected by the gateway itself.
+    }
+  };
+
+  server.prependListener("upgrade", onUpgrade);
+  return () => server.off("upgrade", onUpgrade);
+}
+
 export function installExtensionHeartbeat(
   wss: WebSocketServer,
   options: Pick<GatewayRuntimeOptions, "heartbeatIntervalMs" | "heartbeatTimeoutMs"> = {}
@@ -88,16 +113,21 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
     throw new Error("Both tlsKey and tlsCert are required when TLS is enabled");
   }
 
+  const publicHost = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
+  const localPublicListener = isLoopbackHost(publicHost);
+
   if (!wantsTls) {
     const gateway = await runRemoteGateway(options);
+    const stopUpgradeHardening = installPublicExtensionUpgradeHardening(gateway.httpServer, !localPublicListener);
     const stopHeartbeat = installExtensionHeartbeat(gateway.wss, options);
-    gateway.httpServer.once("close", stopHeartbeat);
+    gateway.httpServer.once("close", () => {
+      stopUpgradeHardening();
+      stopHeartbeat();
+    });
     return { httpServer: gateway.httpServer, wss: gateway.wss, stopHeartbeat };
   }
 
-  const publicHost = options.host ?? process.env.BROWSERCONTROL_GATEWAY_HOST ?? "127.0.0.1";
   const publicPort = options.port ?? Number(process.env.BROWSERCONTROL_GATEWAY_PORT || 8787);
-  const localPublicListener = isLoopbackHost(publicHost);
   const configuredMcpToken = options.mcpBearerToken ?? process.env.BROWSERCONTROL_MCP_TOKEN ?? "";
   const configuredAdminToken = options.adminBearerToken ?? process.env.BROWSERCONTROL_ADMIN_TOKEN ?? "";
   const configuredDeviceToken = options.extensionToken ?? process.env.BROWSERCONTROL_DEVICE_TOKEN ?? "";
@@ -141,6 +171,7 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
     throw new Error("Could not determine internal browserControl relay port");
   }
 
+  const stopUpgradeHardening = installPublicExtensionUpgradeHardening(internalGateway.httpServer, !localPublicListener);
   const stopHeartbeat = installExtensionHeartbeat(internalGateway.wss, options);
   const tlsServer = tls.createServer(
     { key: options.tlsKey!, cert: options.tlsCert! },
@@ -160,6 +191,7 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
   try {
     await listen(tlsServer, publicPort, publicHost);
   } catch (error) {
+    stopUpgradeHardening();
     stopHeartbeat();
     internalGateway.wss.close();
     await closeServer(internalGateway.httpServer);
@@ -167,6 +199,7 @@ export async function runGatewayRuntime(options: GatewayRuntimeOptions = {}): Pr
   }
 
   tlsServer.once("close", () => {
+    stopUpgradeHardening();
     stopHeartbeat();
     internalGateway.wss.close();
     void closeServer(internalGateway.httpServer);
