@@ -109,6 +109,10 @@ function hiddenInput(name: string, value: string): string {
   return `<input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}">`;
 }
 
+function authorizationFormAction(redirectUri?: string): string {
+  return redirectUri ? `'self' ${new URL(redirectUri).origin}` : "'self'";
+}
+
 function writeJson(
   response: http.ServerResponse,
   status: number,
@@ -126,14 +130,14 @@ function writeJson(
   response.end(JSON.stringify(value));
 }
 
-function writeHtml(response: http.ServerResponse, status: number, html: string): void {
+function writeHtml(response: http.ServerResponse, status: number, html: string, redirectUri?: string): void {
   response.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${authorizationFormAction(redirectUri)}; base-uri 'none'; frame-ancestors 'none'`,
   });
   response.end(html);
 }
@@ -636,7 +640,7 @@ export class RelayOAuthService {
       writeHtml(response, 400, this.authorizationPage(null, "Invalid or unsupported OAuth authorization request."));
       return;
     }
-    writeHtml(response, 200, this.authorizationPage(validated));
+    writeHtml(response, 200, this.authorizationPage(validated), validated.redirectUri);
   }
 
   private async handleAuthorizePost(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -667,7 +671,7 @@ export class RelayOAuthService {
     const identity = await this.relayState.authenticateMcp(mcpToken);
     const device = identity ? await this.relayState.getDevice(identity.deviceId) : null;
     if (!identity || !device || device.revokedAt) {
-      writeHtml(response, 401, this.authorizationPage(validated, "browserControl could not verify this Chrome device. Reconnect the extension and restart authorization."));
+      writeHtml(response, 401, this.authorizationPage(validated, "browserControl could not verify this Chrome device. Reconnect the extension and restart authorization."), validated.redirectUri);
       return;
     }
 
