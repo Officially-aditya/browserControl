@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>browserControl</title>
   <style>
-    body{font:13px system-ui,sans-serif;width:340px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}button{padding:9px 11px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}button:disabled{opacity:.55;cursor:default}.row{display:flex;gap:8px;margin-top:12px}.status{padding:10px 11px;border-radius:8px;background:#f3f3f3;margin-bottom:10px;line-height:1.4}.muted{color:#666;font-size:11px;margin-top:8px;line-height:1.45}.grow{flex:1}.section{border-top:1px solid #eee;margin-top:14px;padding-top:12px}.error{color:#b3261e;font-size:11px;margin-top:8px;min-height:15px}.setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 0}.setting input{width:auto}.connected{color:#137333}.secret{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+    body{font:13px system-ui,sans-serif;width:340px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}button{padding:9px 11px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}button:disabled{opacity:.55;cursor:default}.row{display:flex;gap:8px;margin-top:12px}.status{padding:10px 11px;border-radius:8px;background:#f3f3f3;margin-bottom:10px;line-height:1.4}.muted{color:#666;font-size:11px;margin-top:8px;line-height:1.45}.grow{flex:1}.section{border-top:1px solid #eee;margin-top:14px;padding-top:12px}.error{color:#b3261e;font-size:11px;margin-top:8px;min-height:15px}.setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 0}.setting input{width:auto}.connected{color:#137333}
   </style>
 </head>
 <body>
@@ -14,26 +14,26 @@
 
   <div id="connectSection">
     <button id="connect" class="primary grow" style="width:100%">Connect browserControl</button>
-    <div class="muted">One click securely enrolls this Chrome profile and connects it to browserControl.</div>
+    <div class="muted">One click securely enrolls this Chrome profile. No relay URL, admin token, pairing code, or device token is required.</div>
   </div>
 
   <div id="connectedSection" hidden>
     <div class="section">
       <div class="setting"><span>Auto-use active tab</span><input id="autoAttach" type="checkbox" /></div>
       <div class="setting"><span>Follow active tab</span><input id="followActiveTab" type="checkbox" /></div>
-      <div class="muted">The first browser request automatically attaches the active web tab. Control detaches after inactivity and can always be paused locally.</div>
+      <div class="muted">The first browser request uses the active web tab automatically. Control detaches after inactivity and can always be paused locally.</div>
     </div>
 
     <div class="section">
       <button id="copyConnector" class="grow" style="width:100%">Copy Claude connector URL</button>
-      <div class="muted">Add the copied URL as a custom connector in Claude. browserControl will fill its own device credential on the authorization page.</div>
+      <div class="muted">Add this URL to Claude once. During OAuth, browserControl verifies this Chrome profile automatically—no MCP secret needs to be copied.</div>
     </div>
 
     <div class="row"><button id="pause" class="grow">Pause</button><button id="disconnect" class="grow">Disconnect</button></div>
   </div>
 
   <div id="error" class="error"></div>
-  <div class="muted">Production relay: browserControl managed cloud. Developer gateway overrides remain available through extension storage for local testing.</div>
+  <div class="muted">Only normal http/https tabs are controlled. Pause or disconnect locally at any time.</div>
   <script type="module" src="popup.js"></script>
 </body>
 </html>
