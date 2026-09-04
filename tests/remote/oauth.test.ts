@@ -6,6 +6,10 @@ import WebSocket from "ws";
 import { runRemoteGateway } from "../../src/remote/gateway.js";
 
 const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
+const ENROLLMENT_HEADERS = {
+  "Content-Type": "application/json",
+  "X-BrowserControl-Enrollment": "extension-v1",
+};
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 async function reservePort(): Promise<number> {
@@ -24,6 +28,27 @@ function form(values: Record<string, string>): URLSearchParams {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) params.set(key, value);
   return params;
+}
+
+async function enroll(baseUrl: string, name = "OAuth Chrome") {
+  const nonce = "oauth-enrollment-nonce-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDE";
+  const nonceHash = createHash("sha256").update(nonce).digest("hex");
+  const started = await fetch(`${baseUrl}/enroll/start`, {
+    method: "POST",
+    headers: ENROLLMENT_HEADERS,
+    body: JSON.stringify({ nonceHash, name }),
+  });
+  expect(started.status).toBe(201);
+  const startPayload = await started.json() as { ticket: string; expiresAt: number };
+  expect(startPayload.ticket.length).toBeGreaterThan(40);
+
+  const claimed = await fetch(`${baseUrl}/enroll/claim`, {
+    method: "POST",
+    headers: ENROLLMENT_HEADERS,
+    body: JSON.stringify({ ticket: startPayload.ticket, nonce }),
+  });
+  expect(claimed.status).toBe(200);
+  return claimed.json() as Promise<{ deviceId: string; deviceToken: string; mcpToken: string }>;
 }
 
 describe("MCP OAuth for Claude", () => {
@@ -46,25 +71,14 @@ describe("MCP OAuth for Claude", () => {
       leaseTtlMs: 5_000,
     });
 
-    const created = await fetch(`${baseUrl}/pairing/create`, {
-      method: "POST",
-      headers: { Authorization: "Bearer admin-secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "OAuth Chrome" }),
-    });
-    expect(created.status).toBe(201);
-    const pairing = await created.json() as { code: string };
-
-    const claimed = await fetch(`${baseUrl}/pairing/claim`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: pairing.code }),
-    });
-    expect(claimed.status).toBe(200);
-    const credential = await claimed.json() as { deviceId: string; deviceToken: string; mcpToken: string };
+    const credential = await enroll(baseUrl);
     deviceId = credential.deviceId;
     mcpToken = credential.mcpToken;
 
-    extension = new WebSocket(`${baseUrl.replace("http://", "ws://")}/extension?token=${encodeURIComponent(credential.deviceToken)}`);
+    extension = new WebSocket(
+      `${baseUrl.replace("http://", "ws://")}/extension`,
+      [`browsercontrol.${credential.deviceToken}`]
+    );
     await new Promise<void>((resolve, reject) => {
       extension.once("open", resolve);
       extension.once("error", reject);
@@ -107,6 +121,40 @@ describe("MCP OAuth for Claude", () => {
     if (gateway?.httpServer) {
       await new Promise<void>((resolve) => gateway.httpServer.close(() => resolve()));
     }
+  });
+
+  it("requires extension-marked enrollment and proof of possession", async () => {
+    const nonce = "proof-test-nonce-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHI";
+    const nonceHash = createHash("sha256").update(nonce).digest("hex");
+
+    const unmarked = await fetch(`${baseUrl}/enroll/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nonceHash }),
+    });
+    expect(unmarked.status).toBe(403);
+
+    const started = await fetch(`${baseUrl}/enroll/start`, {
+      method: "POST",
+      headers: ENROLLMENT_HEADERS,
+      body: JSON.stringify({ nonceHash, name: "Proof test" }),
+    });
+    expect(started.status).toBe(201);
+    const { ticket } = await started.json() as { ticket: string };
+
+    const wrong = await fetch(`${baseUrl}/enroll/claim`, {
+      method: "POST",
+      headers: ENROLLMENT_HEADERS,
+      body: JSON.stringify({ ticket, nonce: "wrong-proof-nonce-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDE" }),
+    });
+    expect(wrong.status).toBe(401);
+
+    const replay = await fetch(`${baseUrl}/enroll/claim`, {
+      method: "POST",
+      headers: ENROLLMENT_HEADERS,
+      body: JSON.stringify({ ticket, nonce }),
+    });
+    expect(replay.status).toBe(404);
   });
 
   it("discovers OAuth, completes Claude DCR + PKCE, and reaches browser_observe", async () => {

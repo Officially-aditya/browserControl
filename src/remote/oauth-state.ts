@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { RedisClient, redisString } from "./redis-client.js";
 
-export type OAuthRecordKind = "client" | "code" | "access" | "refresh";
+export type OAuthRecordKind = "client" | "code" | "access" | "refresh" | "enroll";
 
 export interface OAuthState {
   put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void>;

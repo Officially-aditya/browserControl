@@ -1,8 +1,26 @@
-import { getGatewayPermissionOrigin, getLoopbackHealthUrl, getReconnectDelay } from "./gateway-connection.js";
+import {
+  PRODUCTION_GATEWAY_URL,
+  PRODUCTION_HTTP_ORIGIN,
+  getGatewayHttpUrl,
+  getGatewayPermissionOrigin,
+  getLoopbackHealthUrl,
+  getReconnectDelay,
+  resolveGatewayUrl,
+} from "./gateway-connection.js";
 import { keyEvents } from "./keyboard.js";
 
 const DEBUGGER_VERSION = "1.3";
 const VISUAL_INVALIDATION_BINDING = "__browserControlVisualInvalidated";
+const CONTROL_SESSION_ALARM = "browsercontrol-control-session-idle";
+const CONTROL_SESSION_IDLE_MINUTES = 15;
+const ENROLLMENT_HEADER = "X-BrowserControl-Enrollment";
+const ENROLLMENT_HEADER_VALUE = "extension-v1";
+const CONTROL_SURFACE_HOSTS = new Set([
+  "claude.ai",
+  "chatgpt.com",
+  "chat.openai.com",
+  "browsercontrol-relay-production.up.railway.app",
+]);
 const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
@@ -33,23 +51,31 @@ const VISUAL_HOOK_SCRIPT = `(() => {
 
 let socket = null;
 let attachedTabId = null;
+let lastTargetTabId = null;
 let visualEpoch = 0;
 let paused = false;
 let manualDisconnect = false;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let gatewayConnectInFlight = false;
+let followTabInFlight = false;
 const observations = new Map();
 const MAX_OBSERVATIONS = 32;
 
 const DEFAULT_CONFIG = {
-  gatewayUrl: "",
+  gatewayUrl: PRODUCTION_GATEWAY_URL,
+  developerGatewayUrl: "",
+  deviceId: "",
   deviceToken: "",
+  mcpToken: "",
   autoReconnect: true,
+  autoAttach: true,
+  followActiveTab: true,
 };
 
 async function getConfig() {
-  return { ...DEFAULT_CONFIG, ...(await chrome.storage.local.get(DEFAULT_CONFIG)) };
+  const stored = { ...DEFAULT_CONFIG, ...(await chrome.storage.local.get(DEFAULT_CONFIG)) };
+  return { ...stored, gatewayUrl: resolveGatewayUrl(stored) };
 }
 
 async function setStatus(status, extra = {}) {
@@ -70,10 +96,64 @@ function invalidateVisualState() {
   observations.clear();
 }
 
+function isControllableWebTab(tab) {
+  if (!tab?.id || !tab.url) return false;
+  try {
+    const protocol = new URL(tab.url).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isControlSurfaceTab(tab) {
+  if (!isControllableWebTab(tab)) return false;
+  try {
+    const hostname = new URL(tab.url).hostname.toLowerCase();
+    for (const root of CONTROL_SURFACE_HOSTS) {
+      if (hostname === root || hostname.endsWith(`.${root}`)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isEligibleTargetTab(tab) {
+  return isControllableWebTab(tab) && !isControlSurfaceTab(tab);
+}
+
+async function rememberTargetTab(tab) {
+  if (!isEligibleTargetTab(tab) || !tab.id) return;
+  lastTargetTabId = tab.id;
+  await chrome.storage.local.set({ lastTargetTabId: tab.id });
+}
+
 async function activeTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id) throw new Error("No active Chrome tab found");
   return tab;
+}
+
+async function preferredTargetTab() {
+  const active = await activeTab();
+  if (isEligibleTargetTab(active)) {
+    await rememberTargetTab(active);
+    return active;
+  }
+
+  const stored = lastTargetTabId ?? (await chrome.storage.local.get("lastTargetTabId")).lastTargetTabId;
+  if (Number.isInteger(stored)) {
+    const previous = await chrome.tabs.get(stored).catch(() => null);
+    if (previous && isEligibleTargetTab(previous)) {
+      lastTargetTabId = stored;
+      return previous;
+    }
+  }
+
+  const error = new Error("Open the web page you want browserControl to use, then return to Claude or ChatGPT and try again");
+  error.code = "NO_TARGET_TAB";
+  throw error;
 }
 
 async function installVisualInvalidationHooks(tabId) {
@@ -82,9 +162,24 @@ async function installVisualInvalidationHooks(tabId) {
   await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", { expression: VISUAL_HOOK_SCRIPT });
 }
 
+async function touchControlSession() {
+  await chrome.storage.local.set({ lastRemoteActivityAt: Date.now() });
+  await chrome.alarms.create(CONTROL_SESSION_ALARM, { delayInMinutes: CONTROL_SESSION_IDLE_MINUTES });
+}
+
 async function attach(tabId) {
-  if (attachedTabId === tabId) return;
-  if (attachedTabId != null) await detach();
+  if (attachedTabId === tabId) {
+    await touchControlSession();
+    return;
+  }
+  const tab = await chrome.tabs.get(tabId);
+  if (!isEligibleTargetTab(tab)) {
+    const error = new Error("browserControl can automatically attach only to normal web tabs outside the AI control surface");
+    error.code = "TAB_NOT_CONTROLLABLE";
+    throw error;
+  }
+  await rememberTargetTab(tab);
+  if (attachedTabId != null) await detach(false);
   await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   attachedTabId = tabId;
   invalidateVisualState();
@@ -98,24 +193,33 @@ async function attach(tabId) {
     invalidateVisualState();
     throw error;
   }
+  await touchControlSession();
   await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
 }
 
-async function detach() {
+async function detach(updateStatus = true) {
   const tabId = attachedTabId;
   attachedTabId = null;
   invalidateVisualState();
   if (tabId != null) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
   }
-  await setStatus(socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+  if (updateStatus) {
+    await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+  }
 }
 
 async function ensureAttached() {
   if (attachedTabId != null) return attachedTabId;
-  const error = new Error("No Chrome tab is shared. Open the browserControl extension and click Share active tab.");
-  error.code = "NO_TAB_SHARED";
-  throw error;
+  const config = await getConfig();
+  if (!config.autoAttach) {
+    const error = new Error("Automatic active-tab control is disabled in the browserControl extension");
+    error.code = "AUTO_ATTACH_DISABLED";
+    throw error;
+  }
+  const tab = await preferredTargetTab();
+  await attach(tab.id);
+  return tab.id;
 }
 
 async function send(method, params = {}) {
@@ -390,8 +494,10 @@ async function switchTab(params) {
   assertFresh(params.observationId);
   const tabId = Number(params.targetId);
   if (!Number.isInteger(tabId)) throw new Error("targetId must be a Chrome tab id");
+  const tab = await chrome.tabs.get(tabId);
+  if (!isEligibleTargetTab(tab)) throw new Error("browserControl cannot switch control to an AI control surface or restricted tab");
   await chrome.tabs.update(tabId, { active: true });
-  await chrome.windows.update((await chrome.tabs.get(tabId)).windowId, { focused: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
   await attach(tabId);
   return { success: true, targetId: String(tabId), visualEpoch };
 }
@@ -401,7 +507,7 @@ async function newTab(params = {}) {
   const safeUrl = assertSafeNewTabUrl(params.url);
   const tab = await chrome.tabs.create({ url: safeUrl, active: true });
   if (!tab.id) throw new Error("Failed to create tab");
-  await attach(tab.id);
+  if (safeUrl !== "about:blank") await attach(tab.id);
   return { success: true, targetId: String(tab.id), visualEpoch };
 }
 
@@ -428,6 +534,7 @@ async function handleRpc(request) {
   if (paused && request.method !== "status") {
     throw Object.assign(new Error("CONTROL_PAUSED_BY_USER"), { code: "CONTROL_PAUSED" });
   }
+  if (request.method !== "status") await touchControlSession();
   switch (request.method) {
     case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN, manualDisconnect };
     case "observe": return observe(request.params || {});
@@ -457,11 +564,66 @@ function clearReconnectTimer() {
   reconnectTimer = null;
 }
 
+async function ensureGatewayPermission(gatewayUrl) {
+  if (gatewayUrl === PRODUCTION_GATEWAY_URL) return;
+  const origin = getGatewayPermissionOrigin(gatewayUrl);
+  if (!origin) throw new Error("Invalid developer gateway URL");
+  const present = await chrome.permissions.contains({ origins: [origin] });
+  if (present) return;
+  const granted = await chrome.permissions.request({ origins: [origin] });
+  if (!granted) throw new Error("Developer relay access was not granted");
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function enrollDevice(gatewayUrl) {
+  await ensureGatewayPermission(gatewayUrl);
+  const nonce = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+  const nonceHash = await sha256Hex(nonce);
+  const platform = await chrome.runtime.getPlatformInfo().catch(() => ({ os: "unknown" }));
+  const headers = {
+    "Content-Type": "application/json",
+    [ENROLLMENT_HEADER]: ENROLLMENT_HEADER_VALUE,
+  };
+
+  const started = await fetch(getGatewayHttpUrl(gatewayUrl, "/enroll/start"), {
+    method: "POST",
+    headers,
+    cache: "no-store",
+    body: JSON.stringify({ nonceHash, name: `Chrome on ${platform.os || "unknown"}` }),
+  });
+  const startPayload = await started.json().catch(() => ({}));
+  if (!started.ok || !startPayload.ticket) {
+    throw new Error(startPayload.error || `Enrollment failed with HTTP ${started.status}`);
+  }
+
+  const claimed = await fetch(getGatewayHttpUrl(gatewayUrl, "/enroll/claim"), {
+    method: "POST",
+    headers,
+    cache: "no-store",
+    body: JSON.stringify({ ticket: startPayload.ticket, nonce }),
+  });
+  const credential = await claimed.json().catch(() => ({}));
+  if (!claimed.ok || !credential.deviceId || !credential.deviceToken || !credential.mcpToken) {
+    throw new Error(credential.error || `Enrollment claim failed with HTTP ${claimed.status}`);
+  }
+  return credential;
+}
+
 async function connectGateway() {
   clearReconnectTimer();
   if (manualDisconnect || gatewayConnectInFlight) return;
   const config = await getConfig();
-  if (!config.gatewayUrl) return;
+  if (!config.deviceToken) return;
   if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) return;
 
   gatewayConnectInFlight = true;
@@ -499,11 +661,7 @@ async function connectGateway() {
       }
     }
 
-    // Auth: prefer Sec-WebSocket-Protocol bearer (URLs leak into logs).
-    // Query param kept for backwards compat with older relays.
-    if (config.deviceToken) url.searchParams.set("token", config.deviceToken);
-    const subprotocols = config.deviceToken ? [`browsercontrol.${config.deviceToken}`] : [];
-    const currentSocket = new WebSocket(url.toString(), subprotocols);
+    const currentSocket = new WebSocket(url.toString(), [`browsercontrol.${config.deviceToken}`]);
     socket = currentSocket;
 
     currentSocket.onopen = async () => {
@@ -538,10 +696,13 @@ async function connectGateway() {
       const revoked = event.code === 4003;
       if (revoked) {
         manualDisconnect = true;
-        await setStatus("error", { lastError: "This device credential was revoked. Pair the extension again." });
+        await chrome.storage.local.set({ deviceId: "", deviceToken: "", mcpToken: "" });
+        await chrome.alarms.clear(CONTROL_SESSION_ALARM);
+        await detach(false);
+        await setStatus("error", { lastError: "This device credential was revoked. Click Connect to securely enroll again." });
         return;
       }
-      await setStatus("disconnected");
+      await setStatus(paused ? "paused" : "disconnected");
       const latestConfig = await getConfig();
       if (!manualDisconnect && latestConfig.autoReconnect) {
         const delay = getReconnectDelay(reconnectAttempts++);
@@ -550,7 +711,7 @@ async function connectGateway() {
     };
 
     currentSocket.onerror = () => {
-      if (socket === currentSocket) void setStatus("disconnected");
+      if (socket === currentSocket) void setStatus("disconnected", { lastError: "Could not reach the browserControl relay. It will retry automatically." });
     };
   } finally {
     gatewayConnectInFlight = false;
@@ -566,6 +727,60 @@ async function replaceGatewayConnection() {
     try { previousSocket.close(1000, "Gateway configuration changed"); } catch {}
   }
   await connectGateway();
+}
+
+async function connectProduction() {
+  const current = await getConfig();
+  const gatewayUrl = resolveGatewayUrl(current);
+  manualDisconnect = false;
+  paused = false;
+  await chrome.storage.local.set({ manualDisconnect: false, paused: false, gatewayUrl, lastError: "" });
+
+  let credential = current.deviceId && current.deviceToken && current.mcpToken
+    ? { deviceId: current.deviceId, deviceToken: current.deviceToken, mcpToken: current.mcpToken }
+    : null;
+  if (!credential) credential = await enrollDevice(gatewayUrl);
+
+  await chrome.storage.local.set({
+    gatewayUrl,
+    deviceId: credential.deviceId,
+    deviceToken: credential.deviceToken,
+    mcpToken: credential.mcpToken,
+    autoReconnect: true,
+    autoAttach: current.autoAttach !== false,
+    followActiveTab: current.followActiveTab !== false,
+    lastError: "",
+  });
+  await replaceGatewayConnection();
+  return { ok: true, deviceId: credential.deviceId };
+}
+
+async function followActiveTabIfNeeded(tabId) {
+  if (followTabInFlight || attachedTabId == null || paused) return;
+  const config = await getConfig();
+  if (!config.followActiveTab) return;
+  followTabInFlight = true;
+  try {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) return;
+    if (isControlSurfaceTab(tab)) return;
+    if (!isControllableWebTab(tab)) {
+      await chrome.alarms.clear(CONTROL_SESSION_ALARM);
+      await detach();
+      return;
+    }
+    await rememberTargetTab(tab);
+    await attach(tabId);
+  } catch {
+    // Tab switches can race with tab close/navigation; the next browser request can reattach.
+  } finally {
+    followTabInFlight = false;
+  }
+}
+
+async function noteActiveTarget(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab && isEligibleTargetTab(tab)) await rememberTargetTab(tab);
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -589,13 +804,58 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
     invalidateVisualState();
-    void setStatus(socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+    void chrome.alarms.clear(CONTROL_SESSION_ALARM);
+    void setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void noteActiveTarget(tabId);
+  void followActiveTabIfNeeded(tabId);
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  void chrome.tabs.query({ active: true, windowId }).then(([tab]) => {
+    if (!tab?.id) return;
+    void noteActiveTarget(tab.id);
+    if (attachedTabId != null && !paused) return followActiveTabIfNeeded(tab.id);
+  }).catch(() => undefined);
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== CONTROL_SESSION_ALARM) return;
+  void detach();
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    if (message.type === "getStatus") return { ...(await chrome.storage.local.get(null)), attachedTabId, visualEpoch, paused, manualDisconnect };
+    if (message.type === "getStatus") {
+      const stored = await chrome.storage.local.get(null);
+      return { ...DEFAULT_CONFIG, ...stored, gatewayUrl: resolveGatewayUrl(stored), attachedTabId, visualEpoch, paused, manualDisconnect };
+    }
+    if (message.type === "connectProduction") return connectProduction();
+    if (message.type === "getOAuthCredential") {
+      const senderUrl = String(sender?.url || "");
+      if (!senderUrl.startsWith(`${PRODUCTION_HTTP_ORIGIN}/authorize`) && !senderUrl.startsWith(`${PRODUCTION_HTTP_ORIGIN}/oauth/authorize`)) {
+        return { ok: false };
+      }
+      const config = await getConfig();
+      return config.mcpToken ? { ok: true, mcpToken: config.mcpToken, deviceId: config.deviceId } : { ok: false };
+    }
+    if (message.type === "updatePreferences") {
+      const preferences = message.preferences || {};
+      const update = {
+        ...(typeof preferences.autoAttach === "boolean" ? { autoAttach: preferences.autoAttach } : {}),
+        ...(typeof preferences.followActiveTab === "boolean" ? { followActiveTab: preferences.followActiveTab } : {}),
+      };
+      await chrome.storage.local.set(update);
+      if (update.autoAttach === false && attachedTabId != null) {
+        await chrome.alarms.clear(CONTROL_SESSION_ALARM);
+        await detach();
+      }
+      return { ok: true };
+    }
     if (message.type === "saveConfig") {
       manualDisconnect = false;
       await chrome.storage.local.set(message.config || {});
@@ -603,25 +863,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return { ok: true };
     }
     if (message.type === "shareActiveTab") {
-      const tab = await activeTab();
+      const tab = await preferredTargetTab();
       await attach(tab.id);
       return { ok: true, targetId: String(tab.id) };
     }
     if (message.type === "togglePause") {
       paused = !paused;
       invalidateVisualState();
+      if (paused) {
+        await chrome.alarms.clear(CONTROL_SESSION_ALARM);
+        await detach(false);
+      }
       await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
       return { ok: true, paused };
     }
     if (message.type === "disconnect") {
       manualDisconnect = true;
       clearReconnectTimer();
+      await chrome.alarms.clear(CONTROL_SESSION_ALARM);
       const closingSocket = socket;
       socket = null;
       if (closingSocket) {
         try { closingSocket.close(1000, "Disconnected by user"); } catch {}
       }
-      await detach();
+      await detach(false);
       await setStatus("disconnected");
       return { ok: true };
     }
@@ -630,4 +895,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-void connectGateway();
+void (async () => {
+  const stored = await chrome.storage.local.get(["paused", "manualDisconnect", "lastTargetTabId"]);
+  paused = !!stored.paused;
+  manualDisconnect = !!stored.manualDisconnect;
+  lastTargetTabId = Number.isInteger(stored.lastTargetTabId) ? stored.lastTargetTabId : null;
+  const current = await activeTab().catch(() => null);
+  if (current && isEligibleTargetTab(current)) await rememberTargetTab(current);
+  await connectGateway();
+})();

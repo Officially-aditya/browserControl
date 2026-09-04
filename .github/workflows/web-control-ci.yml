@@ -51,6 +51,7 @@ jobs:
           node --check extension/service-worker.js
           node --check extension/popup.js
           node --check extension/gateway-connection.js
+          node --check extension/oauth-bridge.js
           if [ -f extension/keyboard.js ]; then node --check extension/keyboard.js; fi
       - run: npm run build
       - name: Core tests

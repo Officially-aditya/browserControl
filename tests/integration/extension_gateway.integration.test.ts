@@ -56,7 +56,11 @@ async function runtimeMessage(wsUrl: string, message: any): Promise<any> {
   return result.result?.value;
 }
 
-async function evaluateWebSocketProbe(wsUrl: string, targetUrl: string): Promise<{ value: any; events: any[] }> {
+async function evaluateWebSocketProbe(
+  wsUrl: string,
+  targetUrl: string,
+  protocols: string[] = []
+): Promise<{ value: any; events: any[] }> {
   const ws = await openWebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
@@ -88,7 +92,7 @@ async function evaluateWebSocketProbe(wsUrl: string, targetUrl: string): Promise
     await call("Network.enable");
     const result = await call("Runtime.evaluate", {
       expression: `new Promise((resolve) => {
-        const probeSocket = new WebSocket(${JSON.stringify(targetUrl)});
+        const probeSocket = new WebSocket(${JSON.stringify(targetUrl)}, ${JSON.stringify(protocols)});
         const timer = setTimeout(() => resolve({ok:false, timeout:true, readyState:probeSocket.readyState}), 3000);
         probeSocket.onopen = () => { clearTimeout(timer); probeSocket.close(1000, "probe"); resolve({ok:true}); };
         probeSocket.onerror = () => { clearTimeout(timer); resolve({ok:false, error:true, readyState:probeSocket.readyState}); };
@@ -200,7 +204,8 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
 
     const probe = await evaluateWebSocketProbe(
       popup.webSocketDebuggerUrl,
-      "wss://localhost:8787/extension?token=extension-canary-device-token"
+      "wss://localhost:8787/extension",
+      ["browsercontrol.extension-canary-device-token"]
     );
     if (!probe.value?.ok) {
       throw new Error(`Extension-page secure WebSocket probe failed: ${JSON.stringify(probe)}`);
@@ -208,7 +213,13 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
 
     const saved = await runtimeMessage(popup.webSocketDebuggerUrl, {
       type: "saveConfig",
-      config: { gatewayUrl: "wss://localhost:8787/extension", deviceToken: "extension-canary-device-token", autoReconnect: true },
+      config: {
+        gatewayUrl: "wss://localhost:8787/extension",
+        deviceToken: "extension-canary-device-token",
+        autoReconnect: true,
+        autoAttach: true,
+        followActiveTab: true,
+      },
     });
     if (!saved?.ok) {
       throw new Error(`Extension saveConfig failed: ${JSON.stringify(saved)}`);
@@ -228,9 +239,6 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
       const state = await runtimeMessage(popup.webSocketDebuggerUrl, { type: "getStatus" });
       throw new Error(`Extension worker received config but never connected: ${JSON.stringify({ saved, state })}`);
     }
-
-    const shared = await runtimeMessage(popup.webSocketDebuggerUrl, { type: "shareActiveTab" });
-    if (!shared?.ok) throw new Error(`Extension shareActiveTab failed: ${JSON.stringify(shared)}`);
 
     client = new Client(
       { name: "extension-canary", version: "1.0.0" },
@@ -262,13 +270,12 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     if (gateway?.httpServer) await new Promise<void>((resolve) => gateway.httpServer.close(() => resolve()));
   });
 
-  it("captures a scaled shared-tab overview and executes an observation-bound click", async () => {
-    const status = await client.callTool({ name: "browser_status", arguments: {} });
-    expect(status.isError).toBeFalsy();
-    const statusPayload = JSON.parse((status.content[0] as any).text);
-    expect(statusPayload.extension.connected).toBe(true);
-    expect(statusPayload.extension.attachedTabId).not.toBeNull();
-    expect(statusPayload.extension.attachedTabId).toBeDefined();
+  it("auto-attaches the active tab, captures a scaled overview, and executes an observation-bound click", async () => {
+    const beforeStatus = await client.callTool({ name: "browser_status", arguments: {} });
+    expect(beforeStatus.isError).toBeFalsy();
+    const beforeStatusPayload = JSON.parse((beforeStatus.content[0] as any).text);
+    expect(beforeStatusPayload.extension.connected).toBe(true);
+    expect(beforeStatusPayload.extension.attachedTabId).toBeNull();
 
     const observation = await client.callTool({
       name: "browser_observe",
@@ -280,6 +287,12 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     expect(metadata.coordinateSpace).toBe("normalized_1000");
     expect(Math.max(metadata.imageWidth, metadata.imageHeight)).toBeLessThanOrEqual(640);
     expect(metadata.imageScale).toBeLessThan(1);
+
+    const afterStatus = await client.callTool({ name: "browser_status", arguments: {} });
+    expect(afterStatus.isError).toBeFalsy();
+    const afterStatusPayload = JSON.parse((afterStatus.content[0] as any).text);
+    expect(afterStatusPayload.extension.attachedTabId).not.toBeNull();
+    expect(afterStatusPayload.extension.attachedTabId).toBeDefined();
 
     const before = await controller.session.send("Runtime.evaluate", {
       expression: "JSON.stringify(window.__STATE__ || {clicks:0})",

@@ -1,5 +1,6 @@
 import http from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { DeviceIdentity } from "./device-auth.js";
 import type { RelayDeviceRecord, RelayState } from "./relay-state.js";
 import {
@@ -9,12 +10,15 @@ import {
 } from "./oauth-state.js";
 
 const BROWSER_SCOPE = "browser:control";
-const CLIENT_TTL_MS = 365 * 24 * 60 * 60_000;
+const CLIENT_TTL_MS = 180 * 24 * 60 * 60_000;
 const AUTH_CODE_TTL_MS = 5 * 60_000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60_000;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60_000;
+const ENROLLMENT_TTL_MS = 60_000;
 const MAX_OAUTH_BODY_BYTES = 64 * 1024;
 const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
+const ENROLLMENT_HEADER = "x-browsercontrol-enrollment";
+const ENROLLMENT_HEADER_VALUE = "extension-v1";
 
 type OAuthClientRecord = {
   clientId: string;
@@ -41,6 +45,12 @@ type OAuthTokenRecord = {
   deviceVersion: number;
   scope: string;
   resource: string;
+  expiresAt: number;
+};
+
+type EnrollmentRecord = {
+  pairingCode: string;
+  nonceHash: string;
   expiresAt: number;
 };
 
@@ -246,6 +256,25 @@ function verifyPkce(verifier: string, challenge: string): boolean {
   return safeEqual(derived, challenge);
 }
 
+function requestAddress(request: http.IncomingMessage): string {
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    const raw = request.headers["x-real-ip"];
+    const value = (Array.isArray(raw) ? raw[0] : raw || "").trim();
+    if (value && isIP(value)) return value;
+  }
+  return request.socket.remoteAddress || "unknown";
+}
+
+function enrollmentRequest(request: http.IncomingMessage): boolean {
+  const raw = request.headers[ENROLLMENT_HEADER];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return value === ENROLLMENT_HEADER_VALUE;
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function oauthError(
   response: http.ServerResponse,
   status: number,
@@ -308,6 +337,16 @@ export class RelayOAuthService {
   ): Promise<boolean> {
     const pathname = url.pathname;
 
+    if (pathname === "/enroll/start" && request.method === "POST") {
+      await this.handleEnrollmentStart(request, response);
+      return true;
+    }
+
+    if (pathname === "/enroll/claim" && request.method === "POST") {
+      await this.handleEnrollmentClaim(request, response);
+      return true;
+    }
+
     if (
       request.method === "GET" &&
       (pathname === "/.well-known/oauth-protected-resource/mcp" || pathname === "/.well-known/oauth-protected-resource")
@@ -368,7 +407,119 @@ export class RelayOAuthService {
     if (this.ownsState) await this.state.close();
   }
 
+  private async handleEnrollmentStart(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    if (!enrollmentRequest(request)) {
+      writeJson(response, 403, { error: "Enrollment is available only to the browserControl extension" });
+      request.resume();
+      return;
+    }
+
+    const address = requestAddress(request);
+    const [perAddress, global] = await Promise.all([
+      this.relayState.consumeRateLimit("enroll-start-ip", address, 6, 10 * 60_000),
+      this.relayState.consumeRateLimit("enroll-start-global", "global", 240, 60_000),
+    ]);
+    if (!perAddress.allowed || !global.allowed) {
+      const retryAfterMs = Math.max(perAddress.retryAfterMs, global.retryAfterMs);
+      writeJson(response, 429, { error: "Too many enrollment attempts" }, {
+        "Retry-After": String(Math.ceil(retryAfterMs / 1000)),
+      });
+      request.resume();
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request);
+    } catch (error: any) {
+      writeJson(response, error?.code === "PAYLOAD_TOO_LARGE" ? 413 : 400, { error: "Invalid enrollment payload" });
+      return;
+    }
+
+    const nonceHash = typeof body.nonceHash === "string" ? body.nonceHash.trim().toLowerCase() : "";
+    if (!/^[a-f0-9]{64}$/.test(nonceHash)) {
+      writeJson(response, 400, { error: "nonceHash must be a SHA-256 hex digest" });
+      return;
+    }
+    const name = typeof body.name === "string" ? body.name.trim().slice(0, 120) || undefined : undefined;
+    const pairing = await this.relayState.createPairing(name, ENROLLMENT_TTL_MS);
+    const ticket = randomToken(32);
+    const expiresAt = Date.now() + ENROLLMENT_TTL_MS;
+    await this.state.put<EnrollmentRecord>("enroll", ticket, {
+      pairingCode: pairing.code,
+      nonceHash,
+      expiresAt,
+    }, ENROLLMENT_TTL_MS);
+    writeJson(response, 201, { ticket, expiresAt });
+  }
+
+  private async handleEnrollmentClaim(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    if (!enrollmentRequest(request)) {
+      writeJson(response, 403, { error: "Enrollment is available only to the browserControl extension" });
+      request.resume();
+      return;
+    }
+
+    const address = requestAddress(request);
+    const [perAddress, global] = await Promise.all([
+      this.relayState.consumeRateLimit("enroll-claim-ip", address, 30, 60_000),
+      this.relayState.consumeRateLimit("enroll-claim-global", "global", 600, 60_000),
+    ]);
+    if (!perAddress.allowed || !global.allowed) {
+      const retryAfterMs = Math.max(perAddress.retryAfterMs, global.retryAfterMs);
+      writeJson(response, 429, { error: "Too many enrollment claims" }, {
+        "Retry-After": String(Math.ceil(retryAfterMs / 1000)),
+      });
+      request.resume();
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonObject(request);
+    } catch (error: any) {
+      writeJson(response, error?.code === "PAYLOAD_TOO_LARGE" ? 413 : 400, { error: "Invalid enrollment claim" });
+      return;
+    }
+
+    const ticket = typeof body.ticket === "string" ? body.ticket.trim() : "";
+    const nonce = typeof body.nonce === "string" ? body.nonce.trim() : "";
+    if (!/^[A-Za-z0-9_-]{43,128}$/.test(ticket) || !/^[A-Za-z0-9_-]{43,128}$/.test(nonce)) {
+      writeJson(response, 400, { error: "Invalid enrollment ticket or nonce" });
+      return;
+    }
+
+    const enrollment = await this.state.take<EnrollmentRecord>("enroll", ticket);
+    if (!enrollment || enrollment.expiresAt <= Date.now()) {
+      writeJson(response, 404, { error: "Enrollment ticket is invalid or expired" });
+      return;
+    }
+    if (!safeEqual(sha256Hex(nonce), enrollment.nonceHash)) {
+      writeJson(response, 401, { error: "Enrollment proof did not match" });
+      return;
+    }
+
+    const credential = await this.relayState.claimPairing(enrollment.pairingCode);
+    if (!credential) {
+      writeJson(response, 410, { error: "Enrollment expired before device credentials could be issued" });
+      return;
+    }
+    writeJson(response, 200, credential);
+  }
+
   private async handleRegistration(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const address = requestAddress(request);
+    const [perAddress, global] = await Promise.all([
+      this.relayState.consumeRateLimit("oauth-register-ip", address, 30, 10 * 60_000),
+      this.relayState.consumeRateLimit("oauth-register-global", "global", 600, 60_000),
+    ]);
+    if (!perAddress.allowed || !global.allowed) {
+      const retryAfterMs = Math.max(perAddress.retryAfterMs, global.retryAfterMs);
+      oauthError(response, 429, "temporarily_unavailable", `Too many client registrations. Retry after ${Math.ceil(retryAfterMs / 1000)} seconds.`);
+      request.resume();
+      return;
+    }
+
     let body: Record<string, unknown>;
     try {
       body = await readJsonObject(request);
@@ -516,7 +667,7 @@ export class RelayOAuthService {
     const identity = await this.relayState.authenticateMcp(mcpToken);
     const device = identity ? await this.relayState.getDevice(identity.deviceId) : null;
     if (!identity || !device || device.revokedAt) {
-      writeHtml(response, 401, this.authorizationPage(validated, "That MCP token is invalid or was rotated. Copy the current token from the browserControl extension and try again."));
+      writeHtml(response, 401, this.authorizationPage(validated, "browserControl could not verify this Chrome device. Reconnect the extension and restart authorization."));
       return;
     }
 
@@ -568,15 +719,15 @@ export class RelayOAuthService {
 <title>Authorize browserControl</title>
 <style>body{font:15px system-ui,sans-serif;max-width:520px;margin:64px auto;padding:0 20px;color:#1f1f1f}h1{font-size:24px}code,input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}input{box-sizing:border-box;width:100%;padding:11px;border:1px solid #bbb;border-radius:8px}.card{border:1px solid #ddd;border-radius:12px;padding:18px}.muted{color:#666;font-size:13px;line-height:1.5}.error,.warning{color:#9a3412;background:#fff7ed;padding:10px;border-radius:8px}.row{display:flex;gap:10px;margin-top:16px}button{padding:10px 14px;border:1px solid #aaa;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111;flex:1}</style>
 </head><body><h1>Authorize browserControl</h1>
-<div class="card"><p><strong>${htmlEscape(clientName)}</strong> wants access to the Chrome device paired with browserControl.</p>
+<div class="card"><p><strong>${htmlEscape(clientName)}</strong> wants access to your Chrome session through browserControl.</p>
 <p class="muted">Redirect: <code>${htmlEscape(redirectHost)}</code><br>Scope: <code>${BROWSER_SCOPE}</code></p>
 ${loopbackWarning}${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}
 ${validated ? `<form method="post" action="/authorize">${hidden}
-<label for="device_token"><strong>MCP bearer token</strong></label>
-<p class="muted">Open the browserControl extension and click <strong>Copy MCP token</strong>. Paste it here. The token is verified by this relay and is never sent to Claude.</p>
+<label for="device_token"><strong>Device verification</strong></label>
+<p class="muted">If the browserControl extension is connected, it verifies this device automatically. Otherwise provide the device MCP credential from a trusted development client.</p>
 <input id="device_token" name="device_token" type="password" autocomplete="off" required autofocus>
-<div class="row"><button type="submit" name="decision" value="deny">Deny</button><button class="primary" type="submit" name="decision" value="approve">Authorize Claude</button></div>
-</form>` : "<p>Return to Claude and restart the connector authorization flow.</p>"}
+<div class="row"><button type="submit" name="decision" value="deny">Deny</button><button class="primary" type="submit" name="decision" value="approve">Authorize</button></div>
+</form>` : "<p>Return to your MCP client and restart the connector authorization flow.</p>"}
 </div><p class="muted">Only approve this page if you started the connection from Claude or another MCP client you trust.</p></body></html>`;
   }
 
