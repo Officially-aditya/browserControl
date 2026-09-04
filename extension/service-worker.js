@@ -7,6 +7,7 @@ import {
   getReconnectDelay,
   resolveGatewayUrl,
 } from "./gateway-connection.js";
+import { createLocalConnection } from "./local-connection.js";
 import { keyEvents } from "./keyboard.js";
 
 const DEBUGGER_VERSION = "1.3";
@@ -15,6 +16,24 @@ const CONTROL_SESSION_ALARM = "browsercontrol-control-session-idle";
 const CONTROL_SESSION_IDLE_MINUTES = 15;
 const ENROLLMENT_HEADER = "X-BrowserControl-Enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
+const TRANSPORT_LEASE_MS = 60_000;
+const MUTATING_RPC_METHODS = new Set([
+  "move",
+  "click",
+  "double_click",
+  "drag",
+  "scroll",
+  "type",
+  "keypress",
+  "navigate",
+  "back",
+  "forward",
+  "reload",
+  "switch_tab",
+  "new_tab",
+  "close_tab",
+  "handle_dialog",
+]);
 const CONTROL_SURFACE_HOSTS = new Set([
   "claude.ai",
   "chatgpt.com",
@@ -50,6 +69,8 @@ const VISUAL_HOOK_SCRIPT = `(() => {
 })();`;
 
 let socket = null;
+let localConnection = null;
+let localConnected = false;
 let attachedTabId = null;
 let lastTargetTabId = null;
 let visualEpoch = 0;
@@ -59,6 +80,8 @@ let reconnectTimer = null;
 let reconnectAttempts = 0;
 let gatewayConnectInFlight = false;
 let followTabInFlight = false;
+let transportLeaseOwner = null;
+let transportLeaseExpiresAt = 0;
 const observations = new Map();
 const MAX_OBSERVATIONS = 32;
 
@@ -78,15 +101,33 @@ async function getConfig() {
   return { ...stored, gatewayUrl: resolveGatewayUrl(stored) };
 }
 
+function remoteConnected() {
+  return socket?.readyState === WebSocket.OPEN;
+}
+
+function anyTransportConnected() {
+  return remoteConnected() || localConnected;
+}
+
 async function setStatus(status, extra = {}) {
-  await chrome.storage.local.set({ status, attachedTabId, visualEpoch, paused, manualDisconnect, ...extra });
+  const effectiveStatus = paused ? "paused" : anyTransportConnected() ? "connected" : status;
+  await chrome.storage.local.set({
+    status: effectiveStatus,
+    attachedTabId,
+    visualEpoch,
+    paused,
+    manualDisconnect,
+    localConnected,
+    remoteConnected: remoteConnected(),
+    ...extra,
+  });
   const map = {
     connected: ["ON", "#137333"],
     paused: ["II", "#b06000"],
     disconnected: ["", "#5f6368"],
     error: ["!", "#b3261e"],
   };
-  const [text, color] = map[status] || ["", "#5f6368"];
+  const [text, color] = map[effectiveStatus] || ["", "#5f6368"];
   chrome.action.setBadgeText({ text });
   chrome.action.setBadgeBackgroundColor({ color });
 }
@@ -194,7 +235,7 @@ async function attach(tabId) {
     throw error;
   }
   await touchControlSession();
-  await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+  await setStatus(paused ? "paused" : anyTransportConnected() ? "connected" : "disconnected");
 }
 
 async function detach(updateStatus = true) {
@@ -205,7 +246,7 @@ async function detach(updateStatus = true) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
   }
   if (updateStatus) {
-    await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+    await setStatus(paused ? "paused" : anyTransportConnected() ? "connected" : "disconnected");
   }
 }
 
@@ -530,13 +571,50 @@ async function handleDialog(params = {}) {
   return { success: true, visualEpoch };
 }
 
-async function handleRpc(request) {
+function claimTransportLease(source, method) {
+  if (!MUTATING_RPC_METHODS.has(method)) return;
+  const now = Date.now();
+  if (transportLeaseOwner && now >= transportLeaseExpiresAt) {
+    transportLeaseOwner = null;
+    transportLeaseExpiresAt = 0;
+  }
+
+  if (source === "local") {
+    transportLeaseOwner = "local";
+    transportLeaseExpiresAt = now + TRANSPORT_LEASE_MS;
+    return;
+  }
+
+  if (transportLeaseOwner === "local") {
+    const error = new Error("A local browserControl agent currently controls this Chrome session");
+    error.code = "DEVICE_BUSY_LOCAL";
+    throw error;
+  }
+
+  transportLeaseOwner = "remote";
+  transportLeaseExpiresAt = now + TRANSPORT_LEASE_MS;
+}
+
+async function handleRpc(request, source = "remote") {
   if (paused && request.method !== "status") {
     throw Object.assign(new Error("CONTROL_PAUSED_BY_USER"), { code: "CONTROL_PAUSED" });
   }
+  claimTransportLease(source, request.method);
   if (request.method !== "status") await touchControlSession();
   switch (request.method) {
-    case "status": return { attachedTabId, visualEpoch, paused, connected: socket?.readyState === WebSocket.OPEN, manualDisconnect };
+    case "status": return {
+      attachedTabId,
+      visualEpoch,
+      paused,
+      connected: anyTransportConnected(),
+      localConnected,
+      remoteConnected: remoteConnected(),
+      manualDisconnect,
+      transportLease: {
+        owner: transportLeaseOwner,
+        expiresAt: transportLeaseExpiresAt,
+      },
+    };
     case "observe": return observe(request.params || {});
     case "inspect_region": return inspectRegion(request.params || {});
     case "move": return mouseMove(request.params || {});
@@ -679,7 +757,7 @@ async function connectGateway() {
       try { request = JSON.parse(event.data); } catch { return; }
       if (!request?.id || !request?.method) return;
       try {
-        const result = await handleRpc(request);
+        const result = await handleRpc(request, "remote");
         if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
           currentSocket.send(JSON.stringify({ id: request.id, ok: true, result }));
         }
@@ -805,7 +883,7 @@ chrome.debugger.onDetach.addListener((source) => {
     attachedTabId = null;
     invalidateVisualState();
     void chrome.alarms.clear(CONTROL_SESSION_ALARM);
-    void setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+    void setStatus(paused ? "paused" : anyTransportConnected() ? "connected" : "disconnected");
   }
 });
 
@@ -832,9 +910,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message.type === "getStatus") {
       const stored = await chrome.storage.local.get(null);
-      return { ...DEFAULT_CONFIG, ...stored, gatewayUrl: resolveGatewayUrl(stored), attachedTabId, visualEpoch, paused, manualDisconnect };
+      return {
+        ...DEFAULT_CONFIG,
+        ...stored,
+        gatewayUrl: resolveGatewayUrl(stored),
+        attachedTabId,
+        visualEpoch,
+        paused,
+        manualDisconnect,
+        localConnected,
+        remoteConnected: remoteConnected(),
+      };
     }
     if (message.type === "connectProduction") return connectProduction();
+    if (message.type === "probeLocal") {
+      await localConnection?.connect();
+      return { ok: true, localConnected };
+    }
     if (message.type === "getOAuthCredential") {
       const senderUrl = String(sender?.url || "");
       if (!senderUrl.startsWith(`${PRODUCTION_HTTP_ORIGIN}/authorize`) && !senderUrl.startsWith(`${PRODUCTION_HTTP_ORIGIN}/oauth/authorize`)) {
@@ -874,7 +966,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.alarms.clear(CONTROL_SESSION_ALARM);
         await detach(false);
       }
-      await setStatus(paused ? "paused" : socket?.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+      await setStatus(paused ? "paused" : anyTransportConnected() ? "connected" : "disconnected");
       return { ok: true, paused };
     }
     if (message.type === "disconnect") {
@@ -887,7 +979,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try { closingSocket.close(1000, "Disconnected by user"); } catch {}
       }
       await detach(false);
-      await setStatus("disconnected");
+      await setStatus(localConnected ? "connected" : "disconnected");
       return { ok: true };
     }
     return { ok: false };
@@ -902,5 +994,14 @@ void (async () => {
   lastTargetTabId = Number.isInteger(stored.lastTargetTabId) ? stored.lastTargetTabId : null;
   const current = await activeTab().catch(() => null);
   if (current && isEligibleTargetTab(current)) await rememberTargetTab(current);
+
+  localConnection = createLocalConnection({
+    handleRpc,
+    onStateChange: ({ connected }) => {
+      localConnected = !!connected;
+      void setStatus(anyTransportConnected() ? "connected" : "disconnected");
+    },
+  });
+
   await connectGateway();
 })();
