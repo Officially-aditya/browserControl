@@ -19,6 +19,7 @@ const MAX_OAUTH_BODY_BYTES = 64 * 1024;
 const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 const ENROLLMENT_HEADER = "x-browsercontrol-enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
+const REVERSE_DOMAIN_NATIVE_SCHEME = /^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/i;
 
 type OAuthClientRecord = {
   clientId: string;
@@ -110,7 +111,12 @@ function hiddenInput(name: string, value: string): string {
 }
 
 function authorizationFormAction(redirectUri?: string): string {
-  return redirectUri ? `'self' ${new URL(redirectUri).origin}` : "'self'";
+  if (!redirectUri) return "'self'";
+  const url = new URL(redirectUri);
+  const callbackSource = url.protocol === "http:" || url.protocol === "https:"
+    ? url.origin
+    : url.protocol.toLowerCase();
+  return `'self' ${callbackSource}`;
 }
 
 function writeJson(
@@ -209,17 +215,30 @@ function normalizeScope(raw: string | undefined | null): string {
   return BROWSER_SCOPE;
 }
 
-function isAllowedRegisteredRedirect(raw: string): boolean {
-  if (!raw || raw.length > 2048) return false;
-  let url: URL;
+function parseRegisteredRedirect(raw: string): URL | null {
+  if (!raw || raw.length > 2048) return null;
   try {
-    url = new URL(raw);
+    const url = new URL(raw);
+    if (url.username || url.password || url.hash) return null;
+    return url;
   } catch {
-    return false;
+    return null;
   }
-  if (url.username || url.password || url.hash) return false;
+}
+
+function isNativePrivateUseRedirect(raw: string): boolean {
+  const url = parseRegisteredRedirect(raw);
+  if (!url || url.protocol === "http:" || url.protocol === "https:") return false;
+  const scheme = url.protocol.slice(0, -1);
+  return REVERSE_DOMAIN_NATIVE_SCHEME.test(scheme);
+}
+
+function isAllowedRegisteredRedirect(raw: string, applicationType: "web" | "native"): boolean {
+  const url = parseRegisteredRedirect(raw);
+  if (!url) return false;
   if (url.toString() === CLAUDE_CALLBACK) return true;
-  return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  if (url.protocol === "http:" && isLoopbackHostname(url.hostname)) return true;
+  return applicationType === "native" && isNativePrivateUseRedirect(raw);
 }
 
 function redirectsMatch(requested: string, registered: string): boolean {
@@ -532,15 +551,37 @@ export class RelayOAuthService {
       return;
     }
 
+    if (
+      body.application_type != null &&
+      body.application_type !== "web" &&
+      body.application_type !== "native"
+    ) {
+      oauthError(response, 400, "invalid_client_metadata", "application_type must be web or native when provided");
+      return;
+    }
+
     const redirectUris = Array.isArray(body.redirect_uris)
       ? body.redirect_uris.filter((value): value is string => typeof value === "string")
       : [];
+    const declaredApplicationType = body.application_type === "native"
+      ? "native"
+      : body.application_type === "web"
+        ? "web"
+        : null;
+    const applicationType: "web" | "native" = declaredApplicationType ?? (
+      redirectUris.some(isNativePrivateUseRedirect) ? "native" : "web"
+    );
     if (
       redirectUris.length === 0 ||
       redirectUris.length > 10 ||
-      redirectUris.some((uri) => !isAllowedRegisteredRedirect(uri))
+      redirectUris.some((uri) => !isAllowedRegisteredRedirect(uri, applicationType))
     ) {
-      oauthError(response, 400, "invalid_redirect_uri", "Register the Claude callback or an RFC 8252 loopback redirect URI");
+      oauthError(
+        response,
+        400,
+        "invalid_redirect_uri",
+        "Register the Claude callback, an RFC 8252 loopback redirect URI, or a reverse-domain private-use URI scheme for a native client"
+      );
       return;
     }
 
@@ -572,7 +613,6 @@ export class RelayOAuthService {
       return;
     }
 
-    const applicationType = body.application_type === "native" ? "native" : "web";
     const clientName = typeof body.client_name === "string"
       ? body.client_name.trim().slice(0, 120) || "Claude MCP client"
       : "Claude MCP client";
@@ -712,10 +752,14 @@ export class RelayOAuthService {
           hiddenInput("resource", validated.resource),
         ].join("\n")
       : "";
-    const redirectHost = validated ? new URL(validated.redirectUri).host : "unknown client";
+    const redirectUrl = validated ? new URL(validated.redirectUri) : null;
+    const redirectTarget = redirectUrl ? (redirectUrl.host || redirectUrl.protocol) : "unknown client";
     const clientName = validated?.client.clientName || "Unknown MCP client";
-    const loopbackWarning = validated && isLoopbackHostname(new URL(validated.redirectUri).hostname)
+    const loopbackWarning = redirectUrl && isLoopbackHostname(redirectUrl.hostname)
       ? "<p class=\"warning\">This client redirects to your local computer. Only continue if you deliberately started a local Claude/Inspector login.</p>"
+      : "";
+    const nativeWarning = validated?.client.applicationType === "native" && redirectUrl?.protocol !== "http:"
+      ? `<p class="muted">After approval, browserControl will return to the native app through <code>${htmlEscape(redirectUrl?.protocol || "")}</code>.</p>`
       : "";
 
     return `<!doctype html>
@@ -724,8 +768,8 @@ export class RelayOAuthService {
 <style>body{font:15px system-ui,sans-serif;max-width:520px;margin:64px auto;padding:0 20px;color:#1f1f1f}h1{font-size:24px}code,input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}input{box-sizing:border-box;width:100%;padding:11px;border:1px solid #bbb;border-radius:8px}.card{border:1px solid #ddd;border-radius:12px;padding:18px}.muted{color:#666;font-size:13px;line-height:1.5}.error,.warning{color:#9a3412;background:#fff7ed;padding:10px;border-radius:8px}.row{display:flex;gap:10px;margin-top:16px}button{padding:10px 14px;border:1px solid #aaa;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111;flex:1}</style>
 </head><body><h1>Authorize browserControl</h1>
 <div class="card"><p><strong>${htmlEscape(clientName)}</strong> wants access to your Chrome session through browserControl.</p>
-<p class="muted">Redirect: <code>${htmlEscape(redirectHost)}</code><br>Scope: <code>${BROWSER_SCOPE}</code></p>
-${loopbackWarning}${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}
+<p class="muted">Redirect: <code>${htmlEscape(redirectTarget)}</code><br>Scope: <code>${BROWSER_SCOPE}</code></p>
+${loopbackWarning}${nativeWarning}${error ? `<p class="error">${htmlEscape(error)}</p>` : ""}
 ${validated ? `<form method="post" action="/authorize">${hidden}
 <label for="device_token"><strong>Device verification</strong></label>
 <p class="muted">If the browserControl extension is connected, it verifies this device automatically. Otherwise provide the device MCP credential from a trusted development client.</p>
