@@ -47,6 +47,11 @@ function parseJson<T>(value: string | null): T | null {
   }
 }
 
+function hasRequiredGrant(kind: OAuthRecordKind, value: unknown): boolean {
+  if (kind !== "code" && kind !== "access" && kind !== "refresh") return true;
+  return !!value && typeof value === "object" && typeof (value as { grantId?: unknown }).grantId === "string";
+}
+
 function grantIdsFromValue(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const grantIds = (value as { grantIds?: unknown }).grantIds;
@@ -95,7 +100,9 @@ export class MemoryOAuthState implements OAuthState {
       this.records.delete(mapKey);
       return null;
     }
-    return parseJson<T>(record.value);
+    const parsed = parseJson<T>(record.value);
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async take<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
@@ -108,7 +115,9 @@ export class MemoryOAuthState implements OAuthState {
     const record = this.records.get(mapKey);
     this.records.delete(mapKey);
     if (!record || record.expiresAt <= Date.now()) return null;
-    return parseJson<T>(record.value);
+    const parsed = parseJson<T>(record.value);
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
@@ -148,8 +157,10 @@ export class RedisOAuthState implements OAuthState {
     if (kind === "grant_index") {
       const redisKey = this.key(kind, key);
       const grantIds = grantIdsFromValue(value);
-      if (grantIds.length > 0) await this.redis.command("SADD", redisKey, ...grantIds);
-      if (grantIds.length > 0) await this.redis.command("PEXPIRE", redisKey, Math.max(1, ttlMs));
+      if (grantIds.length > 0) {
+        await this.redis.command("SADD", redisKey, ...grantIds);
+        await this.redis.command("PEXPIRE", redisKey, Math.max(1, ttlMs));
+      }
       return;
     }
     await this.redis.command(
@@ -167,7 +178,9 @@ export class RedisOAuthState implements OAuthState {
         .filter((value): value is string => typeof value === "string");
       return (values.length ? { grantIds: values } : null) as T | null;
     }
-    return parseJson<T>(redisString(await this.redis.command("GET", this.key(kind, key))));
+    const parsed = parseJson<T>(redisString(await this.redis.command("GET", this.key(kind, key))));
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async take<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
@@ -176,7 +189,9 @@ export class RedisOAuthState implements OAuthState {
       await this.redis.command("DEL", this.key(kind, key));
       return value;
     }
-    return parseJson<T>(redisString(await this.redis.command("GETDEL", this.key(kind, key))));
+    const parsed = parseJson<T>(redisString(await this.redis.command("GETDEL", this.key(kind, key))));
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
