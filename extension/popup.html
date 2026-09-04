@@ -24,8 +24,8 @@
     <input id="connector" class="secret" type="text" readonly autocomplete="off" />
     <label for="connectorToken">MCP bearer token (Authorization header)</label>
     <input id="connectorToken" class="secret" type="password" readonly autocomplete="off" />
-    <div class="row"><button id="copyConnector" class="grow">Copy connector URL</button></div>
-    <div class="muted">Add the URL as a remote MCP connector and set header <span class="secret">Authorization: Bearer &lt;token&gt;</span>. Anyone with the token can invoke browserControl for this device.</div>
+    <div class="row"><button id="copyConnector" class="grow">Copy connector URL</button><button id="copyConnectorToken" class="grow">Copy MCP token</button></div>
+    <div class="muted">For OAuth-capable clients such as Claude, paste this token only into browserControl's authorization page when prompted. For direct MCP clients, send it as <span class="secret">Authorization: Bearer &lt;token&gt;</span>.</div>
   </div>
 
   <div class="section">
