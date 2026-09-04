@@ -194,6 +194,102 @@ describe("MCP OAuth for Claude", () => {
     expect(csp).not.toContain("https://claude.ai");
   });
 
+  it("supports a reverse-domain private-use callback for native Android clients", async () => {
+    const redirectUri = "in.cuppet.app:/oauth/callback";
+    const registered = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "Cuppet Android",
+        redirect_uris: [redirectUri],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+        application_type: "native",
+      }),
+    });
+    expect(registered.status).toBe(201);
+    const client = await registered.json() as { client_id: string; application_type: string };
+    expect(client.application_type).toBe("native");
+
+    const verifier = "android-test-verifier-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDE";
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const authParams = {
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      state: "android-state",
+      scope: "browser:control",
+      resource: `${baseUrl}/mcp`,
+    };
+
+    const authorizePage = await fetch(`${baseUrl}/authorize?${form(authParams)}`);
+    expect(authorizePage.status).toBe(200);
+    expect(authorizePage.headers.get("content-security-policy"))
+      .toContain("form-action 'self' in.cuppet.app:;");
+    expect(await authorizePage.text()).toContain("in.cuppet.app:");
+
+    const approved = await fetch(`${baseUrl}/authorize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form({ ...authParams, device_token: mcpToken, decision: "approve" }),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(303);
+    const callback = new URL(approved.headers.get("location") || "");
+    expect(callback.protocol).toBe("in.cuppet.app:");
+    expect(callback.pathname).toBe("/oauth/callback");
+    expect(callback.searchParams.get("state")).toBe("android-state");
+    expect(callback.searchParams.get("iss")).toBe(baseUrl);
+    const code = callback.searchParams.get("code") || "";
+    expect(code.length).toBeGreaterThan(20);
+
+    const exchanged = await fetch(`${baseUrl}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form({
+        grant_type: "authorization_code",
+        client_id: client.client_id,
+        code,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+        resource: `${baseUrl}/mcp`,
+      }),
+    });
+    expect(exchanged.status).toBe(200);
+    expect(await exchanged.json()).toMatchObject({ token_type: "Bearer" });
+  });
+
+  it("rejects private-use callback schemes for web clients and unsafe native schemes", async () => {
+    const webPrivateUse = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "Bad web client",
+        redirect_uris: ["in.cuppet.app:/oauth/callback"],
+        token_endpoint_auth_method: "none",
+        application_type: "web",
+      }),
+    });
+    expect(webPrivateUse.status).toBe(400);
+    expect(await webPrivateUse.json()).toMatchObject({ error: "invalid_redirect_uri" });
+
+    const unsafeNative = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "Unsafe native client",
+        redirect_uris: ["javascript:alert(1)"],
+        token_endpoint_auth_method: "none",
+        application_type: "native",
+      }),
+    });
+    expect(unsafeNative.status).toBe(400);
+    expect(await unsafeNative.json()).toMatchObject({ error: "invalid_redirect_uri" });
+  });
+
   it("discovers OAuth, completes Claude DCR + PKCE, and reaches browser_observe", async () => {
     const unauthenticated = await fetch(`${baseUrl}/mcp`, { redirect: "manual" });
     expect(unauthenticated.status).toBe(401);
