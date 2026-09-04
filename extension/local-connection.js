@@ -123,7 +123,7 @@ export function createLocalConnection({ handleRpc, onStateChange }) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === LOCAL_PROBE_ALARM) void connect();
   });
-  chrome.alarms.create(LOCAL_PROBE_ALARM, { periodInMinutes: 0.5 });
+  chrome.alarms.create(LOCAL_PROBE_ALARM, { periodInMinutes: 1 });
 
   void connect();
 
