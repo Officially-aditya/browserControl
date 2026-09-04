@@ -215,21 +215,30 @@ function normalizeScope(raw: string | undefined | null): string {
   return BROWSER_SCOPE;
 }
 
-function isAllowedRegisteredRedirect(raw: string, applicationType: "web" | "native"): boolean {
-  if (!raw || raw.length > 2048) return false;
-  let url: URL;
+function parseRegisteredRedirect(raw: string): URL | null {
+  if (!raw || raw.length > 2048) return null;
   try {
-    url = new URL(raw);
+    const url = new URL(raw);
+    if (url.username || url.password || url.hash) return null;
+    return url;
   } catch {
-    return false;
+    return null;
   }
-  if (url.username || url.password || url.hash) return false;
-  if (url.toString() === CLAUDE_CALLBACK) return true;
-  if (url.protocol === "http:" && isLoopbackHostname(url.hostname)) return true;
-  if (applicationType !== "native") return false;
+}
 
+function isNativePrivateUseRedirect(raw: string): boolean {
+  const url = parseRegisteredRedirect(raw);
+  if (!url || url.protocol === "http:" || url.protocol === "https:") return false;
   const scheme = url.protocol.slice(0, -1);
   return REVERSE_DOMAIN_NATIVE_SCHEME.test(scheme);
+}
+
+function isAllowedRegisteredRedirect(raw: string, applicationType: "web" | "native"): boolean {
+  const url = parseRegisteredRedirect(raw);
+  if (!url) return false;
+  if (url.toString() === CLAUDE_CALLBACK) return true;
+  if (url.protocol === "http:" && isLoopbackHostname(url.hostname)) return true;
+  return applicationType === "native" && isNativePrivateUseRedirect(raw);
 }
 
 function redirectsMatch(requested: string, registered: string): boolean {
@@ -542,10 +551,26 @@ export class RelayOAuthService {
       return;
     }
 
-    const applicationType = body.application_type === "native" ? "native" : "web";
+    if (
+      body.application_type != null &&
+      body.application_type !== "web" &&
+      body.application_type !== "native"
+    ) {
+      oauthError(response, 400, "invalid_client_metadata", "application_type must be web or native when provided");
+      return;
+    }
+
     const redirectUris = Array.isArray(body.redirect_uris)
       ? body.redirect_uris.filter((value): value is string => typeof value === "string")
       : [];
+    const declaredApplicationType = body.application_type === "native"
+      ? "native"
+      : body.application_type === "web"
+        ? "web"
+        : null;
+    const applicationType: "web" | "native" = declaredApplicationType ?? (
+      redirectUris.some(isNativePrivateUseRedirect) ? "native" : "web"
+    );
     if (
       redirectUris.length === 0 ||
       redirectUris.length > 10 ||
@@ -555,7 +580,7 @@ export class RelayOAuthService {
         response,
         400,
         "invalid_redirect_uri",
-        "Register the Claude callback, an RFC 8252 loopback redirect URI, or a reverse-domain private-use URI scheme for application_type=native"
+        "Register the Claude callback, an RFC 8252 loopback redirect URI, or a reverse-domain private-use URI scheme for a native client"
       );
       return;
     }
