@@ -1,9 +1,7 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { ControlLease, type BrowserRoute } from "../browser-control/bridge.js";
-import { browserTools, handleBrowserToolCall } from "../browser-control/tools.js";
-import { DEFAULT_LOCAL_PORT, startLocalExtensionServer, type LocalExtensionServer } from "./extension-server.js";
+import { createBrowserControlMcpServer } from "../browser-control/tools.js";
+import { DEFAULT_LOCAL_PORT, startLocalExtensionServer } from "./extension-server.js";
 
 function localPortFromEnvironment(): number {
   const raw = process.env.BROWSERCONTROL_LOCAL_PORT;
@@ -23,19 +21,9 @@ export async function runLocalBrowserControl(): Promise<void> {
     lease: new ControlLease(60_000),
   };
   const clientId = `local-stdio:${process.pid}`;
-
-  const server = new Server(
-    { name: "browser-control-local", version: "0.7.0" },
-    { capabilities: { tools: {} } },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: browserTools() as any,
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const args = (request.params.arguments || {}) as Record<string, any>;
-    return handleBrowserToolCall(route, clientId, request.params.name, args) as any;
+  const server = createBrowserControlMcpServer(route, clientId, {
+    name: "browser-control-local",
+    version: "0.7.0",
   });
 
   let closed = false;
