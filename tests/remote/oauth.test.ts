@@ -157,6 +157,43 @@ describe("MCP OAuth for Claude", () => {
     expect(replay.status).toBe(404);
   });
 
+  it("allows the validated OpenCode loopback callback origin in authorization CSP", async () => {
+    const redirectUri = "http://127.0.0.1:41823/callback";
+    const registered = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "OpenCode",
+        redirect_uris: [redirectUri],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+        application_type: "native",
+      }),
+    });
+    expect(registered.status).toBe(201);
+    const client = await registered.json() as { client_id: string };
+
+    const verifier = "opencode-test-verifier-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDE";
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const authParams = {
+      response_type: "code",
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      state: "opencode-state",
+      scope: "browser:control",
+      resource: `${baseUrl}/mcp`,
+    };
+
+    const authorizePage = await fetch(`${baseUrl}/authorize?${form(authParams)}`);
+    expect(authorizePage.status).toBe(200);
+    const csp = authorizePage.headers.get("content-security-policy") || "";
+    expect(csp).toContain(`form-action 'self' ${new URL(redirectUri).origin};`);
+    expect(csp).not.toContain("https://claude.ai");
+  });
+
   it("discovers OAuth, completes Claude DCR + PKCE, and reaches browser_observe", async () => {
     const unauthenticated = await fetch(`${baseUrl}/mcp`, { redirect: "manual" });
     expect(unauthenticated.status).toBe(401);
@@ -213,6 +250,7 @@ describe("MCP OAuth for Claude", () => {
 
     const authorizePage = await fetch(`${baseUrl}/authorize?${form(authParams)}`);
     expect(authorizePage.status).toBe(200);
+    expect(authorizePage.headers.get("content-security-policy")).toContain("form-action 'self' https://claude.ai;");
     expect(await authorizePage.text()).toContain("Authorize browserControl");
 
     const approved = await fetch(`${baseUrl}/authorize`, {
