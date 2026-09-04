@@ -10,17 +10,10 @@ export type OAuthRecordKind =
   | "approval"
   | "approval_code"
   | "grant"
-  | "grant_index"
-  | "browser_pair"
-  | "browser_pair_code"
-  | "browser_access"
-  | "browser_refresh"
-  | "browser_grant"
-  | "browser_grant_index";
+  | "grant_index";
 
 export interface OAuthState {
   put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void>;
-  putIfAbsent<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<boolean>;
   get<T>(kind: OAuthRecordKind, key: string): Promise<T | null>;
   take<T>(kind: OAuthRecordKind, key: string): Promise<T | null>;
   delete(kind: OAuthRecordKind, key: string): Promise<void>;
@@ -55,18 +48,8 @@ function parseJson<T>(value: string | null): T | null {
 }
 
 function hasRequiredGrant(kind: OAuthRecordKind, value: unknown): boolean {
-  if (
-    kind !== "code" &&
-    kind !== "access" &&
-    kind !== "refresh" &&
-    kind !== "browser_access" &&
-    kind !== "browser_refresh"
-  ) return true;
+  if (kind !== "code" && kind !== "access" && kind !== "refresh") return true;
   return !!value && typeof value === "object" && typeof (value as { grantId?: unknown }).grantId === "string";
-}
-
-function isGrantIndex(kind: OAuthRecordKind): boolean {
-  return kind === "grant_index" || kind === "browser_grant_index";
 }
 
 function grantIdsFromValue(value: unknown): string[] {
@@ -81,7 +64,7 @@ export class MemoryOAuthState implements OAuthState {
   private readonly grantIndexes = new Map<string, MemoryGrantIndex>();
 
   public async put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void> {
-    if (isGrantIndex(kind)) {
+    if (kind === "grant_index") {
       const mapKey = this.key(kind, key);
       const now = Date.now();
       let index = this.grantIndexes.get(mapKey);
@@ -99,20 +82,8 @@ export class MemoryOAuthState implements OAuthState {
     });
   }
 
-  public async putIfAbsent<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<boolean> {
-    if (isGrantIndex(kind)) throw new Error("putIfAbsent is not supported for grant indexes");
-    const mapKey = this.key(kind, key);
-    const current = this.records.get(mapKey);
-    if (current && current.expiresAt > Date.now()) return false;
-    this.records.set(mapKey, {
-      value: JSON.stringify(value),
-      expiresAt: Date.now() + Math.max(1, ttlMs),
-    });
-    return true;
-  }
-
   public async get<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
-    if (isGrantIndex(kind)) {
+    if (kind === "grant_index") {
       const mapKey = this.key(kind, key);
       const index = this.grantIndexes.get(mapKey);
       if (!index) return null;
@@ -135,7 +106,7 @@ export class MemoryOAuthState implements OAuthState {
   }
 
   public async take<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
-    if (isGrantIndex(kind)) {
+    if (kind === "grant_index") {
       const value = await this.get<T>(kind, key);
       this.grantIndexes.delete(this.key(kind, key));
       return value;
@@ -150,7 +121,7 @@ export class MemoryOAuthState implements OAuthState {
   }
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
-    if (isGrantIndex(kind)) this.grantIndexes.delete(this.key(kind, key));
+    if (kind === "grant_index") this.grantIndexes.delete(this.key(kind, key));
     else this.records.delete(this.key(kind, key));
   }
 
@@ -183,7 +154,7 @@ export class RedisOAuthState implements OAuthState {
   }
 
   public async put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void> {
-    if (isGrantIndex(kind)) {
+    if (kind === "grant_index") {
       const redisKey = this.key(kind, key);
       const grantIds = grantIdsFromValue(value);
       if (grantIds.length > 0) {
@@ -201,21 +172,8 @@ export class RedisOAuthState implements OAuthState {
     );
   }
 
-  public async putIfAbsent<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<boolean> {
-    if (isGrantIndex(kind)) throw new Error("putIfAbsent is not supported for grant indexes");
-    const result = await this.redis.command(
-      "SET",
-      this.key(kind, key),
-      JSON.stringify(value),
-      "NX",
-      "PX",
-      Math.max(1, ttlMs)
-    );
-    return result === "OK";
-  }
-
   public async get<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
-    if (isGrantIndex(kind)) {
+    if (kind === "grant_index") {
       const values = redisArray(await this.redis.command("SMEMBERS", this.key(kind, key)))
         .filter((value): value is string => typeof value === "string");
       return (values.length ? { grantIds: values } : null) as T | null;
@@ -226,7 +184,7 @@ export class RedisOAuthState implements OAuthState {
   }
 
   public async take<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
-    if (isGrantIndex(kind)) {
+    if (kind === "grant_index") {
       const value = await this.get<T>(kind, key);
       await this.redis.command("DEL", this.key(kind, key));
       return value;
