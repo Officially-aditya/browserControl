@@ -5,39 +5,35 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>browserControl</title>
   <style>
-    body{font:13px system-ui,sans-serif;width:340px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}label{display:block;font-size:11px;color:#666;margin:10px 0 4px}input{box-sizing:border-box;width:100%;padding:8px;border:1px solid #ccc;border-radius:7px}button{padding:8px 10px;border:1px solid #bbb;border-radius:7px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}button:disabled{opacity:.55;cursor:default}.row{display:flex;gap:8px;margin-top:12px}.status{padding:8px 10px;border-radius:7px;background:#f3f3f3;margin-bottom:10px;line-height:1.35}.muted{color:#666;font-size:11px;margin-top:8px;line-height:1.4}.grow{flex:1}.section{border-top:1px solid #eee;margin-top:14px;padding-top:4px}.error{color:#b3261e;font-size:11px;margin-top:8px;min-height:15px}.secret{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+    body{font:13px system-ui,sans-serif;width:340px;margin:0;padding:16px;background:#fff;color:#1f1f1f}h1{font-size:16px;margin:0 0 12px}button{padding:9px 11px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}button.primary{background:#111;color:#fff;border-color:#111}button:disabled{opacity:.55;cursor:default}.row{display:flex;gap:8px;margin-top:12px}.status{padding:10px 11px;border-radius:8px;background:#f3f3f3;margin-bottom:10px;line-height:1.4}.muted{color:#666;font-size:11px;margin-top:8px;line-height:1.45}.grow{flex:1}.section{border-top:1px solid #eee;margin-top:14px;padding-top:12px}.error{color:#b3261e;font-size:11px;margin-top:8px;min-height:15px}.setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 0}.setting input{width:auto}.connected{color:#137333}.secret{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
   </style>
 </head>
 <body>
   <h1>browserControl</h1>
   <div id="status" class="status">Loading…</div>
 
-  <label for="gateway">Relay WebSocket</label>
-  <input id="gateway" required placeholder="wss://relay.example.com/extension" />
-
-  <label for="pairing">Pairing code</label>
-  <input id="pairing" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="8-digit code" />
-  <div class="row"><button id="pair" class="primary grow">Pair & connect</button></div>
-
-  <div id="connectorSection" class="section" hidden>
-    <label for="connector">Claude / remote MCP connector URL</label>
-    <input id="connector" class="secret" type="text" readonly autocomplete="off" />
-    <label for="connectorToken">MCP bearer token (Authorization header)</label>
-    <input id="connectorToken" class="secret" type="password" readonly autocomplete="off" />
-    <div class="row"><button id="copyConnector" class="grow">Copy connector URL</button><button id="copyConnectorToken" class="grow">Copy MCP token</button></div>
-    <div class="muted">For OAuth-capable clients such as Claude, paste this token only into browserControl's authorization page when prompted. For direct MCP clients, send it as <span class="secret">Authorization: Bearer &lt;token&gt;</span>.</div>
+  <div id="connectSection">
+    <button id="connect" class="primary grow" style="width:100%">Connect browserControl</button>
+    <div class="muted">One click securely enrolls this Chrome profile and connects it to browserControl.</div>
   </div>
 
-  <div class="section">
-    <label for="token">Existing device token <span class="muted">(advanced/local development)</span></label>
-    <input id="token" type="password" autocomplete="off" placeholder="device token" />
-    <div class="row"><button id="save" class="grow">Save token & connect</button></div>
+  <div id="connectedSection" hidden>
+    <div class="section">
+      <div class="setting"><span>Auto-use active tab</span><input id="autoAttach" type="checkbox" /></div>
+      <div class="setting"><span>Follow active tab</span><input id="followActiveTab" type="checkbox" /></div>
+      <div class="muted">The first browser request automatically attaches the active web tab. Control detaches after inactivity and can always be paused locally.</div>
+    </div>
+
+    <div class="section">
+      <button id="copyConnector" class="grow" style="width:100%">Copy Claude connector URL</button>
+      <div class="muted">Add the copied URL as a custom connector in Claude. browserControl will fill its own device credential on the authorization page.</div>
+    </div>
+
+    <div class="row"><button id="pause" class="grow">Pause</button><button id="disconnect" class="grow">Disconnect</button></div>
   </div>
 
   <div id="error" class="error"></div>
-  <div class="row"><button id="share" class="grow">Share active tab</button><button id="pause" class="grow">Pause</button></div>
-  <div class="row"><button id="disconnect" class="grow">Disconnect</button></div>
-  <div class="muted">browserControl only acts while a tab is shared. Pause or disconnect locally at any time.</div>
+  <div class="muted">Production relay: browserControl managed cloud. Developer gateway overrides remain available through extension storage for local testing.</div>
   <script type="module" src="popup.js"></script>
 </body>
 </html>
