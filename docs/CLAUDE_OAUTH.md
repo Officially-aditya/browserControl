@@ -1,15 +1,70 @@
-# Claude.ai → browserControl OAuth
+# Claude.ai → browserControl
 
-browserControl can expose its remote MCP endpoint to Claude.ai without putting a device credential in the connector URL.
+browserControl exposes a remote MCP endpoint to Claude.ai while keeping each Chrome profile isolated behind device-scoped credentials and OAuth.
 
-The public relay acts as both:
+The production user flow is intentionally short:
 
-- the MCP resource server at `/mcp`, and
-- a small OAuth authorization server that supports protected-resource discovery, authorization-server metadata, Dynamic Client Registration (DCR), authorization code + PKCE (`S256`), rotating refresh tokens, and opaque device-scoped access tokens.
+```text
+Install extension
+→ Connect browserControl
+→ Add the browserControl connector to Claude
+→ Authorize once
+→ Ask Claude to use the browser
+```
 
-OAuth is additive: direct MCP clients may still use the paired device MCP token in an `Authorization: Bearer ...` header.
+Users do not need to know the relay WebSocket URL, admin token, pairing code, device token, or MCP token.
 
-## Railway
+## Production endpoints
+
+The unpacked production extension uses the managed browserControl relay directly:
+
+```text
+WSS: https://browsercontrol-relay-production.up.railway.app/extension
+MCP: https://browsercontrol-relay-production.up.railway.app/mcp
+```
+
+The WebSocket endpoint is stored internally as:
+
+```text
+wss://browsercontrol-relay-production.up.railway.app/extension
+```
+
+Many extensions/users connect to the same endpoint. The relay routes each connection by its independently issued `deviceId` and device credential.
+
+A hidden loopback-only developer override remains available in extension storage for local testing. Alternate public relay URLs are not accepted by the production extension.
+
+## One-click device enrollment
+
+Clicking **Connect browserControl** performs enrollment automatically:
+
+1. The extension generates a random 256-bit nonce locally.
+2. It sends only the SHA-256 nonce digest to `/enroll/start`.
+3. The relay creates a random high-entropy enrollment ticket valid for 60 seconds.
+4. The extension immediately claims the ticket with the original nonce.
+5. The ticket is atomically consumed and cannot be replayed.
+6. The relay issues a device-scoped `deviceId`, WebSocket credential, and MCP credential.
+7. The extension stores them in extension-local storage and opens the WSS connection.
+
+Enrollment requests are rate-limited per client address and globally. The temporary enrollment ticket cannot authenticate `/extension` or `/mcp` and is unrelated to the long-lived device credential.
+
+The admin bearer token remains an operator-only credential for device listing, connector rotation and revocation. It is no longer part of normal user onboarding.
+
+## Automatic active-tab control
+
+The extension does not attach the debugger merely because it is connected.
+
+When an authenticated MCP client first invokes a browser action such as `browser_observe`:
+
+1. browserControl finds the active Chrome tab in the last-focused window;
+2. if it is a normal `http://` or `https://` page, the extension attaches the Chrome debugger;
+3. the action proceeds against that tab;
+4. the local extension badge shows that browserControl is active.
+
+By default **Follow active tab** is enabled. While a control session is active, switching to another normal web tab moves the debugger attachment to that tab. Switching to a restricted Chrome/internal page detaches control.
+
+After 15 minutes without remote browser activity the extension automatically detaches. **Pause** detaches immediately and blocks remote actions until resumed. **Disconnect** also closes the relay connection.
+
+## Railway OAuth
 
 Railway supplies `RAILWAY_PUBLIC_DOMAIN`. browserControl automatically uses:
 
@@ -17,57 +72,39 @@ Railway supplies `RAILWAY_PUBLIC_DOMAIN`. browserControl automatically uses:
 https://${RAILWAY_PUBLIC_DOMAIN}
 ```
 
-as its OAuth issuer, so a Railway deployment needs no extra OAuth environment variable.
-
-On other hosts set:
+as its OAuth issuer. On other hosts set:
 
 ```text
 BROWSERCONTROL_PUBLIC_BASE_URL=https://relay.example.com
 ```
 
-The value must be an HTTPS origin with no path, query, or fragment.
+With Redis configured, enrollment tickets, OAuth clients, authorization codes, access-token records, refresh-token records, device metadata and presence records use shared state. Browser screenshots and browser RPC payloads do not pass through Redis.
 
-With Redis configured, OAuth clients, authorization codes, access-token records, and refresh-token records use the same shared Redis control plane. Raw OAuth secrets are hashed before they are used as Redis keys. Browser screenshots and browser RPC payloads do not pass through Redis.
-
-## Verify OAuth is enabled
+## Verify the relay
 
 ```bash
-curl https://YOUR_RELAY/health
+curl https://browsercontrol-relay-production.up.railway.app/health
 ```
 
-A deployed public relay should include:
+A production relay should include:
 
 ```json
 {
   "ok": true,
   "oauthEnabled": true,
-  "oauthIssuer": "https://YOUR_RELAY"
+  "connectedDevices": 1,
+  "extensionConnected": true
 }
 ```
 
-Protected resource metadata:
+OAuth discovery endpoints are:
 
 ```text
-https://YOUR_RELAY/.well-known/oauth-protected-resource/mcp
-```
-
-Authorization server metadata:
-
-```text
-https://YOUR_RELAY/.well-known/oauth-authorization-server
+https://browsercontrol-relay-production.up.railway.app/.well-known/oauth-protected-resource/mcp
+https://browsercontrol-relay-production.up.railway.app/.well-known/oauth-authorization-server
 ```
 
 An unauthenticated request to `/mcp` returns `401` with a `WWW-Authenticate` challenge pointing to the protected-resource metadata.
-
-## Pair Chrome first
-
-1. Load `extension/` as an unpacked Chrome extension.
-2. Pair it with the relay using the one-time pairing code.
-3. Confirm the extension reports `Connected`.
-4. Click **Share active tab** on the browser tab Claude should control.
-5. In the connector section, **Copy MCP token** is available. Do not paste this token into Claude's connector URL.
-
-The MCP token is used only on browserControl's own OAuth approval page to prove which paired browser the new OAuth grant should control.
 
 ## Add browserControl to Claude.ai
 
@@ -75,78 +112,70 @@ In Claude.ai:
 
 1. Open **Customize → Connectors**.
 2. Add a custom connector.
-3. Enter the exact MCP URL:
+3. Enter:
 
    ```text
-   https://YOUR_RELAY/mcp
+   https://browsercontrol-relay-production.up.railway.app/mcp
    ```
 
-4. Leave manually supplied OAuth client credentials empty. browserControl supports Dynamic Client Registration.
-5. Start/connect the authorization flow.
+4. Leave manually supplied OAuth client credentials empty.
+5. Start authorization.
 
-Claude discovers browserControl's OAuth metadata and registers as a public OAuth client. Claude uses PKCE `S256` and redirects the authorization response to:
+Claude discovers browserControl's OAuth metadata, performs Dynamic Client Registration, and uses authorization code + PKCE `S256`.
 
-```text
-https://claude.ai/api/mcp/auth_callback
-```
+## Authorization UX
 
-browserControl explicitly allows that hosted Claude callback (and HTTP loopback callbacks for local MCP clients).
+Claude opens browserControl's authorization page. When the browserControl extension is installed and connected, its content script recognizes only the managed browserControl authorization origin and obtains the local device MCP credential from the extension service worker.
 
-## Authorize the paired browser
+The credential field is then hidden and filled only when the user clicks **Authorize**. The user still explicitly approves the OAuth grant, but no token copying or pasting is required.
 
-Claude opens browserControl's authorization page.
+The device MCP credential is verified by the browserControl relay and is not sent to Claude. Claude receives its own opaque OAuth access token and rotating refresh token.
 
-1. Open the browserControl extension.
-2. Click **Copy MCP token**.
-3. Paste the token into the browserControl authorization page.
-4. Check that the page says the requesting client is the Claude connector you just started.
-5. Click **Authorize Claude**.
-
-The relay validates the MCP token locally and binds the OAuth authorization code to that paired device. The underlying MCP token is never sent to Claude.
-
-Claude exchanges the code using its PKCE verifier and receives an opaque access token plus a rotating refresh token. The access token resolves to the paired browser on every `/mcp` request.
-
-If the paired device is revoked or its MCP connector token is rotated, existing OAuth access/refresh tokens for that credential version stop authenticating.
+If the device is revoked or its MCP connector credential is rotated, OAuth grants tied to the old credential version stop authenticating.
 
 ## End-to-end canary
 
-With a harmless tab shared, ask Claude:
+Open a harmless normal web page and ask Claude:
 
 ```text
-Use browserControl to inspect the shared browser tab and tell me what page is open.
+Use browserControl to inspect the browser and tell me what page is open.
 ```
 
-The expected path is:
+Expected path:
 
 ```text
 Claude.ai
   → OAuth access token
-  → https://YOUR_RELAY/mcp
+  → /mcp
   → browser_observe
   → Railway relay
-  → existing extension WebSocket
-  → screenshot from the shared local Chrome tab
+  → device-routed WSS
+  → browserControl extension
+  → auto-attach active web tab
+  → screenshot
   → Claude
 ```
 
-Then ask for a visible action, for example:
+Then ask for a visible action:
 
 ```text
-Click the Issues tab in the shared browser.
+Click the Issues tab in the browser.
 ```
 
-Claude should call `browser_click` with the fresh `observationId` returned by `browser_observe`, and the real Chrome tab on the user's computer should change.
-
-That is the full browserControl product proof: the model already running inside Claude.ai is the only reasoning model; browserControl supplies authenticated browser I/O.
+Claude should call `browser_click` with the fresh `observationId` returned by `browser_observe`, and the real Chrome tab should change.
 
 ## Security properties
 
-- MCP credentials are never placed in query strings.
-- OAuth authorization uses PKCE `S256`.
-- Authorization codes are single-use and expire quickly.
-- Refresh tokens rotate on use.
-- OAuth grants are scoped to `browser:control` and the exact `/mcp` resource URL.
-- Redirect URIs are restricted to Claude's hosted callback or RFC 8252-style local loopback callbacks.
-- Authorization approval happens on the browserControl relay, not inside an untrusted webpage.
-- Device revocation and MCP-token rotation invalidate grants tied to the previous device credential version.
-- Existing observation freshness and local Pause/Disconnect controls remain unchanged.
+- one managed production relay endpoint; identity is device-scoped rather than URL-scoped;
+- self-enrollment tickets are random, short-lived, single-use, proof-bound and rate-limited;
+- long-lived device credentials are independent, revocable and stored only in extension-local storage;
+- production extension WebSocket auth uses `Sec-WebSocket-Protocol`, not a credential in the URL;
+- OAuth authorization uses PKCE `S256`;
+- authorization codes are single-use and short-lived;
+- refresh tokens rotate on use;
+- OAuth grants are scoped to `browser:control` and the exact `/mcp` resource;
+- redirect URIs are restricted to Claude's hosted callback or local loopback clients;
+- automatic control attaches only normal HTTP(S) tabs;
+- mutating actions remain bound to fresh observations;
+- local Pause/Disconnect remain authoritative;
+- idle sessions detach automatically.
