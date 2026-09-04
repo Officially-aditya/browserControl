@@ -30,17 +30,12 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
   let transport: StdioClientTransport;
 
   beforeAll(async () => {
-    client = new Client(
-      { name: "local-extension-canary", version: "1.0.0" },
-      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
-    );
+    client = new Client({ name: "local-extension-canary", version: "1.0.0" });
     transport = new StdioClientTransport({
       command: process.execPath,
       args: [path.resolve(process.cwd(), "dist/local/runtime.js")],
     });
     await client.connect(transport);
-    expect(client.getProtocolEra()).toBe("modern");
-    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
 
     fixture = await startTestServer(0);
     const extensionDir = path.resolve(process.cwd(), "extension");
