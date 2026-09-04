@@ -1,19 +1,33 @@
 {
   "manifest_version": 3,
   "name": "browserControl",
-  "version": "0.2.0",
-  "description": "Securely let connected AI clients control the Chrome tab you explicitly share.",
+  "version": "0.3.0",
+  "description": "Securely connect AI clients to the active Chrome tab through browserControl.",
   "minimum_chrome_version": "116",
-  "permissions": ["debugger", "tabs", "storage", "activeTab"],
+  "permissions": ["debugger", "tabs", "storage", "activeTab", "alarms"],
+  "host_permissions": [
+    "https://browsercontrol-relay-production.up.railway.app/*"
+  ],
   "optional_host_permissions": [
-    "https://*/*",
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "https://localhost/*",
+    "http://127.0.0.1/*",
+    "https://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://browsercontrol-relay-production.up.railway.app/authorize*",
+        "https://browsercontrol-relay-production.up.railway.app/oauth/authorize*"
+      ],
+      "js": ["oauth-bridge.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_title": "browserControl",
     "default_popup": "popup.html"
