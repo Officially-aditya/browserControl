@@ -15,8 +15,12 @@ function setBusy(button, busy, label) {
   button.textContent = busy ? label : button.dataset.defaultLabel;
 }
 
+async function readState() {
+  return call({ type: "getStatus" });
+}
+
 async function refresh() {
-  const state = await call({ type: "getStatus" });
+  const state = await readState();
   const connected = state.status === "connected" || state.status === "paused";
   const paused = !!state.paused;
   const attached = !!state.attachedTabId;
@@ -38,6 +42,18 @@ async function refresh() {
   $("followActiveTab").checked = state.followActiveTab !== false;
 
   if (state.lastError) setError(state.lastError);
+  return state;
+}
+
+async function waitForConnected(timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readState();
+    if (state.status === "connected" || state.status === "paused") return state;
+    if (state.status === "error") throw new Error(state.lastError || "browserControl could not connect");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("browserControl enrollment succeeded, but the secure relay connection did not come online");
 }
 
 $("connect").dataset.defaultLabel = $("connect").textContent;
@@ -49,7 +65,8 @@ $("connect").addEventListener("click", async () => {
   try {
     const result = await call({ type: "connectProduction" });
     if (!result?.ok) throw new Error(result?.error || "Could not connect browserControl");
-    setError("Connected. Add the Claude connector once, then browserControl is ready whenever you need it.");
+    await waitForConnected();
+    setError("Connected. Add the Claude connector once; browserControl will handle future sessions automatically.");
   } catch (error) {
     setError(error?.message || String(error));
   } finally {
