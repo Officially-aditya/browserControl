@@ -15,6 +15,12 @@ const CONTROL_SESSION_ALARM = "browsercontrol-control-session-idle";
 const CONTROL_SESSION_IDLE_MINUTES = 15;
 const ENROLLMENT_HEADER = "X-BrowserControl-Enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
+const CONTROL_SURFACE_HOSTS = new Set([
+  "claude.ai",
+  "chatgpt.com",
+  "chat.openai.com",
+  "browsercontrol-relay-production.up.railway.app",
+]);
 const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
@@ -45,6 +51,7 @@ const VISUAL_HOOK_SCRIPT = `(() => {
 
 let socket = null;
 let attachedTabId = null;
+let lastTargetTabId = null;
 let visualEpoch = 0;
 let paused = false;
 let manualDisconnect = false;
@@ -99,10 +106,54 @@ function isControllableWebTab(tab) {
   }
 }
 
+function isControlSurfaceTab(tab) {
+  if (!isControllableWebTab(tab)) return false;
+  try {
+    const hostname = new URL(tab.url).hostname.toLowerCase();
+    for (const root of CONTROL_SURFACE_HOSTS) {
+      if (hostname === root || hostname.endsWith(`.${root}`)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isEligibleTargetTab(tab) {
+  return isControllableWebTab(tab) && !isControlSurfaceTab(tab);
+}
+
+async function rememberTargetTab(tab) {
+  if (!isEligibleTargetTab(tab) || !tab.id) return;
+  lastTargetTabId = tab.id;
+  await chrome.storage.local.set({ lastTargetTabId: tab.id });
+}
+
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id) throw new Error("No active Chrome tab found");
   return tab;
+}
+
+async function preferredTargetTab() {
+  const active = await activeTab();
+  if (isEligibleTargetTab(active)) {
+    await rememberTargetTab(active);
+    return active;
+  }
+
+  const stored = lastTargetTabId ?? (await chrome.storage.local.get("lastTargetTabId")).lastTargetTabId;
+  if (Number.isInteger(stored)) {
+    const previous = await chrome.tabs.get(stored).catch(() => null);
+    if (previous && isEligibleTargetTab(previous)) {
+      lastTargetTabId = stored;
+      return previous;
+    }
+  }
+
+  const error = new Error("Open the web page you want browserControl to use, then return to Claude or ChatGPT and try again");
+  error.code = "NO_TARGET_TAB";
+  throw error;
 }
 
 async function installVisualInvalidationHooks(tabId) {
@@ -122,11 +173,12 @@ async function attach(tabId) {
     return;
   }
   const tab = await chrome.tabs.get(tabId);
-  if (!isControllableWebTab(tab)) {
-    const error = new Error("browserControl can automatically attach only to normal http/https tabs");
+  if (!isEligibleTargetTab(tab)) {
+    const error = new Error("browserControl can automatically attach only to normal web tabs outside the AI control surface");
     error.code = "TAB_NOT_CONTROLLABLE";
     throw error;
   }
+  await rememberTargetTab(tab);
   if (attachedTabId != null) await detach(false);
   await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   attachedTabId = tabId;
@@ -165,12 +217,7 @@ async function ensureAttached() {
     error.code = "AUTO_ATTACH_DISABLED";
     throw error;
   }
-  const tab = await activeTab();
-  if (!isControllableWebTab(tab)) {
-    const error = new Error("Open a normal http/https page before asking browserControl to use the browser");
-    error.code = "TAB_NOT_CONTROLLABLE";
-    throw error;
-  }
+  const tab = await preferredTargetTab();
   await attach(tab.id);
   return tab.id;
 }
@@ -448,7 +495,7 @@ async function switchTab(params) {
   const tabId = Number(params.targetId);
   if (!Number.isInteger(tabId)) throw new Error("targetId must be a Chrome tab id");
   const tab = await chrome.tabs.get(tabId);
-  if (!isControllableWebTab(tab)) throw new Error("browserControl can switch only to normal http/https tabs");
+  if (!isEligibleTargetTab(tab)) throw new Error("browserControl cannot switch control to an AI control surface or restricted tab");
   await chrome.tabs.update(tabId, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });
   await attach(tabId);
@@ -715,17 +762,25 @@ async function followActiveTabIfNeeded(tabId) {
   followTabInFlight = true;
   try {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab || !isControllableWebTab(tab)) {
+    if (!tab) return;
+    if (isControlSurfaceTab(tab)) return;
+    if (!isControllableWebTab(tab)) {
       await chrome.alarms.clear(CONTROL_SESSION_ALARM);
       await detach();
       return;
     }
+    await rememberTargetTab(tab);
     await attach(tabId);
   } catch {
     // Tab switches can race with tab close/navigation; the next browser request can reattach.
   } finally {
     followTabInFlight = false;
   }
+}
+
+async function noteActiveTarget(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab && isEligibleTargetTab(tab)) await rememberTargetTab(tab);
 }
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -755,13 +810,16 @@ chrome.debugger.onDetach.addListener((source) => {
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void noteActiveTarget(tabId);
   void followActiveTabIfNeeded(tabId);
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE || attachedTabId == null || paused) return;
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
   void chrome.tabs.query({ active: true, windowId }).then(([tab]) => {
-    if (tab?.id) return followActiveTabIfNeeded(tab.id);
+    if (!tab?.id) return;
+    void noteActiveTarget(tab.id);
+    if (attachedTabId != null && !paused) return followActiveTabIfNeeded(tab.id);
   }).catch(() => undefined);
 });
 
@@ -805,7 +863,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return { ok: true };
     }
     if (message.type === "shareActiveTab") {
-      const tab = await activeTab();
+      const tab = await preferredTargetTab();
       await attach(tab.id);
       return { ok: true, targetId: String(tab.id) };
     }
@@ -838,8 +896,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 void (async () => {
-  const stored = await chrome.storage.local.get(["paused", "manualDisconnect"]);
+  const stored = await chrome.storage.local.get(["paused", "manualDisconnect", "lastTargetTabId"]);
   paused = !!stored.paused;
   manualDisconnect = !!stored.manualDisconnect;
+  lastTargetTabId = Number.isInteger(stored.lastTargetTabId) ? stored.lastTargetTabId : null;
+  const current = await activeTab().catch(() => null);
+  if (current && isEligibleTargetTab(current)) await rememberTargetTab(current);
   await connectGateway();
 })();
