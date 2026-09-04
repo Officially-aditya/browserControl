@@ -57,6 +57,7 @@ describe("MCP OAuth for Claude", () => {
   let baseUrl: string;
   let extension: WebSocket;
   let deviceId: string;
+  let deviceToken: string;
   let mcpToken: string;
 
   beforeAll(async () => {
@@ -73,6 +74,7 @@ describe("MCP OAuth for Claude", () => {
 
     const credential = await enroll(baseUrl);
     deviceId = credential.deviceId;
+    deviceToken = credential.deviceToken;
     mcpToken = credential.mcpToken;
 
     extension = new WebSocket(
@@ -194,7 +196,7 @@ describe("MCP OAuth for Claude", () => {
     expect(csp).not.toContain("https://claude.ai");
   });
 
-  it("infers a native client from a reverse-domain Android callback and completes PKCE", async () => {
+  it("requires explicit Mac approval for a native Android callback and binds the grant to that device", async () => {
     const redirectUri = "in.cuppet.app:/oauth/callback";
     const registered = await fetch(`${baseUrl}/register`, {
       method: "POST",
@@ -228,16 +230,71 @@ describe("MCP OAuth for Claude", () => {
     expect(authorizePage.status).toBe(200);
     expect(authorizePage.headers.get("content-security-policy"))
       .toContain("form-action 'self' in.cuppet.app:;");
-    expect(await authorizePage.text()).toContain("in.cuppet.app:");
+    const html = await authorizePage.text();
+    expect(html).toContain("Cuppet Android");
+    expect(html).toContain("in.cuppet.app:");
+    const approvalCode = html.match(/id="approval-code" class="code">([A-Z0-9]{8})</)?.[1] || "";
+    expect(approvalCode).toMatch(/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/);
+    const refresh = authorizePage.headers.get("refresh") || "";
+    const requestId = refresh.match(/request_id=([A-Za-z0-9_-]+)/)?.[1] || "";
+    expect(requestId.length).toBeGreaterThan(20);
 
-    const approved = await fetch(`${baseUrl}/authorize`, {
+    const directNativePost = await fetch(`${baseUrl}/authorize`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form({ ...authParams, device_token: mcpToken, decision: "approve" }),
       redirect: "manual",
     });
-    expect(approved.status).toBe(303);
-    const callback = new URL(approved.headers.get("location") || "");
+    expect(directNativePost.status).toBe(400);
+
+    const unauthenticatedLookup = await fetch(`${baseUrl}/device-approvals/lookup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: approvalCode }),
+    });
+    expect(unauthenticatedLookup.status).toBe(401);
+
+    const lookup = await fetch(`${baseUrl}/device-approvals/lookup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${deviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ code: approvalCode }),
+    });
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toMatchObject({
+      requestId,
+      clientName: "Cuppet Android",
+      callback: "in.cuppet.app:",
+      scope: "browser:control",
+    });
+
+    const otherDevice = await enroll(baseUrl, "Other Chrome");
+    const otherLookup = await fetch(`${baseUrl}/device-approvals/lookup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${otherDevice.deviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ code: approvalCode }),
+    });
+    expect(otherLookup.status).toBe(200);
+
+    const approved = await fetch(`${baseUrl}/device-approvals/decision`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${deviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ code: approvalCode, requestId, decision: "approve" }),
+    });
+    expect(approved.status).toBe(200);
+    expect(await approved.json()).toMatchObject({ success: true, decision: "approve", deviceId });
+
+    const stolenAfterApproval = await fetch(`${baseUrl}/device-approvals/decision`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${otherDevice.deviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ code: approvalCode, requestId, decision: "approve" }),
+    });
+    expect(stolenAfterApproval.status).toBe(409);
+
+    const completed = await fetch(`${baseUrl}/authorize/device-status?request_id=${encodeURIComponent(requestId)}`, {
+      redirect: "manual",
+    });
+    expect(completed.status).toBe(303);
+    const callback = new URL(completed.headers.get("location") || "");
     expect(callback.protocol).toBe("in.cuppet.app:");
     expect(callback.pathname).toBe("/oauth/callback");
     expect(callback.searchParams.get("state")).toBe("android-state");
@@ -258,7 +315,60 @@ describe("MCP OAuth for Claude", () => {
       }),
     });
     expect(exchanged.status).toBe(200);
-    expect(await exchanged.json()).toMatchObject({ token_type: "Bearer" });
+    const token = await exchanged.json() as { access_token: string; refresh_token: string; token_type: string };
+    expect(token.token_type).toBe("Bearer");
+
+    const grants = await fetch(`${baseUrl}/device-approvals/grants`, {
+      headers: { Authorization: `Bearer ${deviceToken}` },
+    });
+    expect(grants.status).toBe(200);
+    const grantPayload = await grants.json() as { grants: Array<{ grantId: string; clientName: string }> };
+    const cuppetGrant = grantPayload.grants.find((grant) => grant.clientName === "Cuppet Android");
+    expect(cuppetGrant?.grantId).toMatch(/^grant_/);
+
+    const otherGrants = await fetch(`${baseUrl}/device-approvals/grants`, {
+      headers: { Authorization: `Bearer ${otherDevice.deviceToken}` },
+    });
+    expect(otherGrants.status).toBe(200);
+    expect(await otherGrants.json()).toMatchObject({ grants: [] });
+
+    const wrongDeviceRevoke = await fetch(`${baseUrl}/device-approvals/grants/revoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${otherDevice.deviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ grantId: cuppetGrant?.grantId }),
+    });
+    expect(wrongDeviceRevoke.status).toBe(404);
+
+    const beforeRevoke = await fetch(`${baseUrl}/mcp`, {
+      headers: { Authorization: `Bearer ${token.access_token}` },
+      redirect: "manual",
+    });
+    expect(beforeRevoke.status).not.toBe(401);
+
+    const revoked = await fetch(`${baseUrl}/device-approvals/grants/revoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${deviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ grantId: cuppetGrant?.grantId }),
+    });
+    expect(revoked.status).toBe(200);
+
+    const afterRevoke = await fetch(`${baseUrl}/mcp`, {
+      headers: { Authorization: `Bearer ${token.access_token}` },
+      redirect: "manual",
+    });
+    expect(afterRevoke.status).toBe(401);
+
+    const refreshAfterRevoke = await fetch(`${baseUrl}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form({
+        grant_type: "refresh_token",
+        client_id: client.client_id,
+        refresh_token: token.refresh_token,
+      }),
+    });
+    expect(refreshAfterRevoke.status).toBe(400);
+    expect(await refreshAfterRevoke.json()).toMatchObject({ error: "invalid_grant" });
   });
 
   it("rejects explicit web private-use redirects, unsafe schemes, and invalid application types", async () => {
