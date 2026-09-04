@@ -1,6 +1,14 @@
 import { PRODUCTION_MCP_URL } from "./gateway-connection.js";
+import {
+  decideRemoteApproval,
+  listRemoteGrants,
+  lookupRemoteApproval,
+  revokeRemoteGrant,
+} from "./remote-approval.js";
 
 const $ = (id) => document.getElementById(id);
+let pendingApproval = null;
+let remoteReady = false;
 
 async function call(message) {
   return chrome.runtime.sendMessage(message);
@@ -25,6 +33,72 @@ function setModePill(id, connected, onLabel, offLabel) {
   element.classList.toggle("on", connected);
 }
 
+function clearApprovalReview() {
+  pendingApproval = null;
+  $("approvalReview").hidden = true;
+  $("approvalClient").textContent = "";
+  $("approvalMeta").textContent = "";
+}
+
+function renderGrants(grants) {
+  const list = $("grantsList");
+  list.textContent = "";
+  if (!grants.length) {
+    list.textContent = "No active remote app grants on this browser device.";
+    return;
+  }
+
+  for (const grant of grants) {
+    const row = document.createElement("div");
+    row.className = "grant";
+
+    const head = document.createElement("div");
+    head.className = "grant-head";
+    const name = document.createElement("div");
+    name.className = "grant-name";
+    name.textContent = grant.clientName || "MCP client";
+    const revoke = document.createElement("button");
+    revoke.className = "mini danger";
+    revoke.textContent = "Revoke";
+    revoke.addEventListener("click", async () => {
+      if (!window.confirm(`Revoke ${name.textContent}'s access to this Chrome device?`)) return;
+      revoke.disabled = true;
+      setError();
+      try {
+        await revokeRemoteGrant(grant.grantId);
+        setError(`${name.textContent} was revoked. Existing OAuth access and refresh tokens for this grant are no longer accepted.`);
+        await refreshGrants();
+      } catch (error) {
+        setError(error?.message || String(error));
+      } finally {
+        revoke.disabled = false;
+      }
+    });
+    head.append(name, revoke);
+
+    const meta = document.createElement("div");
+    meta.className = "muted";
+    const lastUsed = grant.lastUsedAt ? new Date(grant.lastUsedAt).toLocaleString() : "unknown";
+    meta.textContent = `${grant.scope || "browser:control"} • last authorized ${lastUsed}`;
+    row.append(head, meta);
+    list.append(row);
+  }
+}
+
+async function refreshGrants() {
+  if (!remoteReady) {
+    $("grantsList").textContent = "Enable remote access to manage app grants.";
+    return;
+  }
+  $("grantsList").textContent = "Loading…";
+  try {
+    renderGrants(await listRemoteGrants());
+  } catch (error) {
+    $("grantsList").textContent = "Could not load authorized apps.";
+    setError(error?.message || String(error));
+  }
+}
+
 async function refresh() {
   const state = await readState();
   const localConnected = !!state.localConnected;
@@ -33,6 +107,7 @@ async function refresh() {
   const attached = !!state.attachedTabId;
   const enrolled = !!(state.deviceId && state.deviceToken && state.mcpToken);
   const anyConnected = localConnected || remoteConnected;
+  remoteReady = remoteConnected;
 
   setModePill("localState", localConnected, "Connected", "Waiting");
   setModePill("remoteState", remoteConnected, "Connected", enrolled ? "Offline" : "Off");
@@ -51,11 +126,13 @@ async function refresh() {
   $("connect").textContent = enrolled ? "Reconnect remote access" : "Enable remote access";
   $("connect").dataset.defaultLabel = $("connect").textContent;
   $("probeLocal").dataset.defaultLabel = "Check local connection";
+  $("reviewApproval").dataset.defaultLabel = "Review";
   $("pause").textContent = paused ? "Resume" : "Pause";
   $("pause").disabled = !anyConnected && !paused;
   $("autoAttach").checked = state.autoAttach !== false;
   $("followActiveTab").checked = state.followActiveTab !== false;
 
+  if (!remoteConnected) clearApprovalReview();
   if (state.lastError && !localConnected) setError(state.lastError);
   return state;
 }
@@ -73,6 +150,7 @@ async function waitForRemoteConnected(timeoutMs = 8000) {
 
 $("connect").dataset.defaultLabel = $("connect").textContent;
 $("probeLocal").dataset.defaultLabel = $("probeLocal").textContent;
+$("reviewApproval").dataset.defaultLabel = $("reviewApproval").textContent;
 
 $("connect").addEventListener("click", async () => {
   const button = $("connect");
@@ -88,6 +166,7 @@ $("connect").addEventListener("click", async () => {
   } finally {
     setBusy(button, false, "Connecting…");
     await refresh();
+    if (remoteReady) await refreshGrants();
   }
 });
 
@@ -121,6 +200,55 @@ $("copyConnector").addEventListener("click", async () => {
   }
 });
 
+$("reviewApproval").addEventListener("click", async () => {
+  const button = $("reviewApproval");
+  setError();
+  clearApprovalReview();
+  setBusy(button, true, "Checking…");
+  try {
+    const result = await lookupRemoteApproval($("approvalCode").value);
+    pendingApproval = { code: result.code, ...result.request };
+    $("approvalClient").textContent = result.request.clientName || "MCP client";
+    $("approvalMeta").textContent = `Callback ${result.request.callback} • Scope ${result.request.scope} • expires ${new Date(result.request.expiresAt).toLocaleTimeString()}`;
+    $("approvalReview").hidden = false;
+  } catch (error) {
+    setError(error?.message || String(error));
+  } finally {
+    setBusy(button, false, "Checking…");
+  }
+});
+
+async function submitApprovalDecision(decision) {
+  if (!pendingApproval) return;
+  const allow = $("allowApproval");
+  const deny = $("denyApproval");
+  allow.disabled = true;
+  deny.disabled = true;
+  setError();
+  try {
+    await decideRemoteApproval({
+      code: pendingApproval.code,
+      requestId: pendingApproval.requestId,
+      decision,
+    });
+    const name = pendingApproval.clientName || "The app";
+    clearApprovalReview();
+    $("approvalCode").value = "";
+    setError(decision === "approve"
+      ? `${name} was approved for this browser device. The phone must finish the PKCE OAuth exchange before access becomes active.`
+      : `${name} was denied.`);
+  } catch (error) {
+    setError(error?.message || String(error));
+  } finally {
+    allow.disabled = false;
+    deny.disabled = false;
+  }
+}
+
+$("allowApproval").addEventListener("click", () => void submitApprovalDecision("approve"));
+$("denyApproval").addEventListener("click", () => void submitApprovalDecision("deny"));
+$("refreshGrants").addEventListener("click", () => void refreshGrants());
+
 for (const id of ["autoAttach", "followActiveTab"]) {
   $(id).addEventListener("change", async () => {
     setError();
@@ -148,7 +276,12 @@ $("disconnect").addEventListener("click", async () => {
   const result = await call({ type: "disconnect" });
   if (!result?.ok) setError(result?.error || "Could not disable remote access");
   else setError("Remote access disabled. Local agents can continue using browserControl directly.");
+  clearApprovalReview();
   await refresh();
 });
 
-void refresh().then(() => call({ type: "probeLocal" })).then(() => refresh()).catch(() => undefined);
+void refresh()
+  .then(() => call({ type: "probeLocal" }))
+  .then(() => refresh())
+  .then(() => remoteReady ? refreshGrants() : undefined)
+  .catch(() => undefined);

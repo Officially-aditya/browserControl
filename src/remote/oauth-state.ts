@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
-import { RedisClient, redisString } from "./redis-client.js";
+import { RedisClient, redisArray, redisString } from "./redis-client.js";
 
-export type OAuthRecordKind = "client" | "code" | "access" | "refresh" | "enroll";
+export type OAuthRecordKind =
+  | "client"
+  | "code"
+  | "access"
+  | "refresh"
+  | "enroll"
+  | "approval"
+  | "approval_code"
+  | "grant"
+  | "grant_index";
 
 export interface OAuthState {
   put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void>;
@@ -13,6 +22,11 @@ export interface OAuthState {
 
 type MemoryRecord = {
   value: string;
+  expiresAt: number;
+};
+
+type MemoryGrantIndex = {
+  grantIds: Set<string>;
   expiresAt: number;
 };
 
@@ -33,10 +47,35 @@ function parseJson<T>(value: string | null): T | null {
   }
 }
 
+function hasRequiredGrant(kind: OAuthRecordKind, value: unknown): boolean {
+  if (kind !== "code" && kind !== "access" && kind !== "refresh") return true;
+  return !!value && typeof value === "object" && typeof (value as { grantId?: unknown }).grantId === "string";
+}
+
+function grantIdsFromValue(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const grantIds = (value as { grantIds?: unknown }).grantIds;
+  if (!Array.isArray(grantIds)) return [];
+  return [...new Set(grantIds.filter((item): item is string => typeof item === "string" && item.length <= 160))];
+}
+
 export class MemoryOAuthState implements OAuthState {
   private readonly records = new Map<string, MemoryRecord>();
+  private readonly grantIndexes = new Map<string, MemoryGrantIndex>();
 
   public async put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void> {
+    if (kind === "grant_index") {
+      const mapKey = this.key(kind, key);
+      const now = Date.now();
+      let index = this.grantIndexes.get(mapKey);
+      if (!index || index.expiresAt <= now) {
+        index = { grantIds: new Set<string>(), expiresAt: now + Math.max(1, ttlMs) };
+        this.grantIndexes.set(mapKey, index);
+      }
+      for (const grantId of grantIdsFromValue(value)) index.grantIds.add(grantId);
+      index.expiresAt = now + Math.max(1, ttlMs);
+      return;
+    }
     this.records.set(this.key(kind, key), {
       value: JSON.stringify(value),
       expiresAt: Date.now() + Math.max(1, ttlMs),
@@ -44,6 +83,16 @@ export class MemoryOAuthState implements OAuthState {
   }
 
   public async get<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
+    if (kind === "grant_index") {
+      const mapKey = this.key(kind, key);
+      const index = this.grantIndexes.get(mapKey);
+      if (!index) return null;
+      if (index.expiresAt <= Date.now()) {
+        this.grantIndexes.delete(mapKey);
+        return null;
+      }
+      return { grantIds: [...index.grantIds] } as T;
+    }
     const mapKey = this.key(kind, key);
     const record = this.records.get(mapKey);
     if (!record) return null;
@@ -51,23 +100,34 @@ export class MemoryOAuthState implements OAuthState {
       this.records.delete(mapKey);
       return null;
     }
-    return parseJson<T>(record.value);
+    const parsed = parseJson<T>(record.value);
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async take<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
+    if (kind === "grant_index") {
+      const value = await this.get<T>(kind, key);
+      this.grantIndexes.delete(this.key(kind, key));
+      return value;
+    }
     const mapKey = this.key(kind, key);
     const record = this.records.get(mapKey);
     this.records.delete(mapKey);
     if (!record || record.expiresAt <= Date.now()) return null;
-    return parseJson<T>(record.value);
+    const parsed = parseJson<T>(record.value);
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
-    this.records.delete(this.key(kind, key));
+    if (kind === "grant_index") this.grantIndexes.delete(this.key(kind, key));
+    else this.records.delete(this.key(kind, key));
   }
 
   public async close(): Promise<void> {
     this.records.clear();
+    this.grantIndexes.clear();
   }
 
   private key(kind: OAuthRecordKind, key: string): string {
@@ -94,6 +154,15 @@ export class RedisOAuthState implements OAuthState {
   }
 
   public async put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void> {
+    if (kind === "grant_index") {
+      const redisKey = this.key(kind, key);
+      const grantIds = grantIdsFromValue(value);
+      if (grantIds.length > 0) {
+        await this.redis.command("SADD", redisKey, ...grantIds);
+        await this.redis.command("PEXPIRE", redisKey, Math.max(1, ttlMs));
+      }
+      return;
+    }
     await this.redis.command(
       "SET",
       this.key(kind, key),
@@ -104,11 +173,25 @@ export class RedisOAuthState implements OAuthState {
   }
 
   public async get<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
-    return parseJson<T>(redisString(await this.redis.command("GET", this.key(kind, key))));
+    if (kind === "grant_index") {
+      const values = redisArray(await this.redis.command("SMEMBERS", this.key(kind, key)))
+        .filter((value): value is string => typeof value === "string");
+      return (values.length ? { grantIds: values } : null) as T | null;
+    }
+    const parsed = parseJson<T>(redisString(await this.redis.command("GET", this.key(kind, key))));
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async take<T>(kind: OAuthRecordKind, key: string): Promise<T | null> {
-    return parseJson<T>(redisString(await this.redis.command("GETDEL", this.key(kind, key))));
+    if (kind === "grant_index") {
+      const value = await this.get<T>(kind, key);
+      await this.redis.command("DEL", this.key(kind, key));
+      return value;
+    }
+    const parsed = parseJson<T>(redisString(await this.redis.command("GETDEL", this.key(kind, key))));
+    if (!hasRequiredGrant(kind, parsed)) return null;
+    return parsed;
   }
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
