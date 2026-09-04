@@ -1,35 +1,48 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import path from "node:path";
 import { launchRealChrome, type LaunchedChrome } from "../helpers/chrome-launcher.js";
 import { startTestServer, type TestServer } from "../fixtures/test-server.js";
 import { ChromeController } from "../../src/controller.js";
-import { ControlLease, type BrowserRoute } from "../../src/browser-control/bridge.js";
-import { handleBrowserToolCall } from "../../src/browser-control/tools.js";
-import { startLocalExtensionServer, type LocalExtensionServer } from "../../src/local/extension-server.js";
 
 const canaryConfigured = Boolean(process.env.CHROME_PATH);
 
-async function waitForLocalExtension(server: LocalExtensionServer): Promise<void> {
+async function waitForLocalExtension(client: Client): Promise<any> {
   const deadline = Date.now() + 10_000;
+  let lastStatus: any = null;
   while (Date.now() < deadline) {
-    const health = await fetch(`http://127.0.0.1:${server.port}/health`).then((response) => response.json()) as any;
-    if (health.extensionConnected) return;
+    const status = await client.callTool({ name: "browser_status", arguments: {} });
+    if (!status.isError) {
+      lastStatus = JSON.parse((status.content[0] as any).text);
+      if (lastStatus.extension?.connected) return lastStatus;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for the browserControl extension to connect to the localhost bridge");
+  throw new Error(`Timed out waiting for the browserControl extension to connect to local stdio MCP: ${JSON.stringify(lastStatus)}`);
 }
 
-describe.skipIf(!canaryConfigured)("Real Chrome extension -> local bridge -> browser tools canary", () => {
+describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP canary", () => {
   let chrome: LaunchedChrome;
   let fixture: TestServer;
   let controller: ChromeController;
-  let local: LocalExtensionServer;
-  let route: BrowserRoute;
+  let client: Client;
+  let transport: StdioClientTransport;
 
   beforeAll(async () => {
-    local = await startLocalExtensionServer({ port: 8765 });
-    fixture = await startTestServer(0);
+    client = new Client(
+      { name: "local-extension-canary", version: "1.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [path.resolve(process.cwd(), "dist/local/runtime.js")],
+    });
+    await client.connect(transport);
+    expect(client.getProtocolEra()).toBe("modern");
+    expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
 
+    fixture = await startTestServer(0);
     const extensionDir = path.resolve(process.cwd(), "extension");
     chrome = await launchRealChrome({
       windowSize: "1280,800",
@@ -45,34 +58,38 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local bridge -> bro
     controller = new ChromeController({ mode: "ws-endpoint", wsEndpoint: chrome.wsUrl });
     await controller.connect();
     await controller.executeBrowserAction({ type: "navigate", url: `${fixture.url}/interactive.html` });
-
-    await waitForLocalExtension(local);
-    route = {
-      deviceId: "local-canary",
-      bridge: local.bridge,
-      lease: new ControlLease(60_000),
-    };
+    await waitForLocalExtension(client);
   }, 30_000);
 
   afterAll(async () => {
-    try { await handleBrowserToolCall(route, "local-canary", "browser_release_control", {}); } catch {}
+    try { await client?.callTool({ name: "browser_release_control", arguments: {} }); } catch {}
+    try { await client?.close(); } catch {}
     try { await controller?.disconnect(); } catch {}
     try { await chrome?.close(); } catch {}
     try { await fixture?.close(); } catch {}
-    try { await local?.close(); } catch {}
+  });
+
+  it("exposes the canonical browserControl tool surface over stdio", async () => {
+    const tools = await client.listTools();
+    const names = tools.tools.map((tool) => tool.name);
+    expect(names).toContain("browser_observe");
+    expect(names).toContain("browser_click");
+    expect(names).toContain("browser_tabs");
+    expect(names).not.toContain("computer_action");
+    expect(names).not.toContain("browser_action");
   });
 
   it("observes and clicks the existing Chrome tab without using the relay", async () => {
-    const status = await handleBrowserToolCall(route, "local-canary", "browser_status", {});
+    const status = await client.callTool({ name: "browser_status", arguments: {} });
     expect(status.isError).toBeFalsy();
     const statusPayload = JSON.parse((status.content[0] as any).text);
     expect(statusPayload.extension.connected).toBe(true);
     expect(statusPayload.extension.localConnected).toBe(true);
     expect(statusPayload.extension.remoteConnected).toBe(false);
 
-    const observation = await handleBrowserToolCall(route, "local-canary", "browser_observe", {
-      format: "png",
-      maxLongEdge: 640,
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "png", maxLongEdge: 640 },
     });
     expect(observation.isError).toBeFalsy();
     expect((observation.content[1] as any).type).toBe("image");
@@ -86,11 +103,14 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local bridge -> bro
     });
     const beforeClicks = JSON.parse(before.result.value).clicks || 0;
 
-    const clicked = await handleBrowserToolCall(route, "local-canary", "browser_click", {
-      observationId: metadata.observationId,
-      x: 68,
-      y: 151,
-      button: "left",
+    const clicked = await client.callTool({
+      name: "browser_click",
+      arguments: {
+        observationId: metadata.observationId,
+        x: 68,
+        y: 151,
+        button: "left",
+      },
     });
     expect(clicked.isError).toBeFalsy();
 
@@ -104,9 +124,9 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local bridge -> bro
   });
 
   it("rejects stale observations locally with the same semantics as remote", async () => {
-    const observation = await handleBrowserToolCall(route, "local-canary", "browser_observe", {
-      format: "jpeg",
-      maxLongEdge: 640,
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
     });
     expect(observation.isError).toBeFalsy();
     const metadata = JSON.parse((observation.content[0] as any).text);
@@ -122,11 +142,14 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local bridge -> bro
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    const stale = await handleBrowserToolCall(route, "local-canary", "browser_click", {
-      observationId: metadata.observationId,
-      x: 68,
-      y: 151,
-      button: "left",
+    const stale = await client.callTool({
+      name: "browser_click",
+      arguments: {
+        observationId: metadata.observationId,
+        x: 68,
+        y: 151,
+        button: "left",
+      },
     });
     expect(stale.isError).toBe(true);
     expect((stale.content[0] as any).text).toContain("STALE_OBSERVATION");
