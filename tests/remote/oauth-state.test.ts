@@ -24,7 +24,36 @@ async function exerciseGrantIndex(state: OAuthState): Promise<void> {
   );
 }
 
-describe("OAuth grant index state", () => {
+async function exerciseLegacyCredentialRejection(state: OAuthState): Promise<void> {
+  const ttlMs = 60_000;
+  const base = {
+    clientId: "legacy-client",
+    deviceId: "legacy-device",
+    deviceVersion: 1,
+    scope: "browser:control",
+    resource: "https://example.test/mcp",
+    expiresAt: Date.now() + ttlMs,
+  };
+
+  await state.put("access", "legacy-access", base, ttlMs);
+  expect(await state.get("access", "legacy-access")).toBeNull();
+
+  await state.put("refresh", "legacy-refresh", base, ttlMs);
+  expect(await state.take("refresh", "legacy-refresh")).toBeNull();
+
+  await state.put("code", "legacy-code", {
+    ...base,
+    redirectUri: "https://example.test/callback",
+    codeChallenge: "challenge",
+  }, ttlMs);
+  expect(await state.take("code", "legacy-code")).toBeNull();
+
+  const bound = { ...base, grantId: "grant_bound" };
+  await state.put("access", "bound-access", bound, ttlMs);
+  expect(await state.get("access", "bound-access")).toMatchObject({ grantId: "grant_bound" });
+}
+
+describe("OAuth grant state", () => {
   it("merges grant IDs in memory instead of losing concurrent writers", async () => {
     const state = new MemoryOAuthState();
     try {
@@ -42,6 +71,28 @@ describe("OAuth grant index state", () => {
     });
     try {
       await exerciseGrantIndex(state);
+    } finally {
+      await state.close();
+    }
+  });
+
+  it("rejects pre-grant OAuth credentials in memory", async () => {
+    const state = new MemoryOAuthState();
+    try {
+      await exerciseLegacyCredentialRejection(state);
+    } finally {
+      await state.close();
+    }
+  });
+
+  it("rejects pre-grant OAuth credentials in Redis", async () => {
+    const redisUrl = process.env.BROWSERCONTROL_TEST_REDIS_URL;
+    if (!redisUrl) return;
+    const state = RedisOAuthState.fromUrl(redisUrl, {
+      prefix: `browsercontrol-oauth-legacy-test-${crypto.randomUUID()}`,
+    });
+    try {
+      await exerciseLegacyCredentialRejection(state);
     } finally {
       await state.close();
     }
