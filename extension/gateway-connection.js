@@ -21,8 +21,7 @@ export function getGatewayHttpUrl(gatewayUrl, pathname = "/") {
 }
 
 export function getGatewayMcpUrl(gatewayUrl = PRODUCTION_GATEWAY_URL) {
-  const url = getGatewayHttpUrl(gatewayUrl, "/mcp");
-  return url.toString();
+  return getGatewayHttpUrl(gatewayUrl, "/mcp").toString();
 }
 
 export function getGatewayPermissionOrigin(gatewayUrl) {
@@ -44,15 +43,27 @@ export function getLoopbackHealthUrl(gatewayUrl) {
   }
 }
 
-export function resolveGatewayUrl(config = {}) {
-  const override = String(config.developerGatewayUrl || "").trim();
-  if (!override) return PRODUCTION_GATEWAY_URL;
-  const url = new URL(override);
+function validateDeveloperGateway(raw) {
+  const url = new URL(raw);
   if (!["ws:", "wss:"].includes(url.protocol)) throw new Error("Developer gateway must use ws:// or wss://");
-  if (url.protocol === "ws:" && !isLoopbackHostname(url.hostname)) {
-    throw new Error("Developer ws:// override is allowed only for loopback");
-  }
+  if (!isLoopbackHostname(url.hostname)) throw new Error("Developer gateway override is allowed only for loopback");
   return url.toString();
+}
+
+export function resolveGatewayUrl(config = {}) {
+  const explicit = String(config.developerGatewayUrl || "").trim();
+  if (explicit) return validateDeveloperGateway(explicit);
+
+  // Backwards-compatible hidden local-dev path for existing test/dev profiles.
+  // Non-loopback legacy URLs never override the managed production relay.
+  const legacy = String(config.gatewayUrl || "").trim();
+  if (legacy && legacy !== PRODUCTION_GATEWAY_URL) {
+    try {
+      const parsed = new URL(legacy);
+      if (isLoopbackHostname(parsed.hostname)) return validateDeveloperGateway(legacy);
+    } catch {}
+  }
+  return PRODUCTION_GATEWAY_URL;
 }
 
 export function getReconnectDelay(attempt) {
