@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { RedisClient, redisString } from "./redis-client.js";
+import { RedisClient, redisArray, redisString } from "./redis-client.js";
 
 export type OAuthRecordKind =
   | "client"
@@ -17,11 +17,19 @@ export interface OAuthState {
   get<T>(kind: OAuthRecordKind, key: string): Promise<T | null>;
   take<T>(kind: OAuthRecordKind, key: string): Promise<T | null>;
   delete(kind: OAuthRecordKind, key: string): Promise<void>;
+  addSetMember(kind: OAuthRecordKind, key: string, value: string, ttlMs: number): Promise<void>;
+  removeSetMember(kind: OAuthRecordKind, key: string, value: string): Promise<void>;
+  getSetMembers(kind: OAuthRecordKind, key: string): Promise<string[]>;
   close(): Promise<void>;
 }
 
 type MemoryRecord = {
   value: string;
+  expiresAt: number;
+};
+
+type MemorySetRecord = {
+  values: Set<string>;
   expiresAt: number;
 };
 
@@ -44,6 +52,7 @@ function parseJson<T>(value: string | null): T | null {
 
 export class MemoryOAuthState implements OAuthState {
   private readonly records = new Map<string, MemoryRecord>();
+  private readonly sets = new Map<string, MemorySetRecord>();
 
   public async put<T>(kind: OAuthRecordKind, key: string, value: T, ttlMs: number): Promise<void> {
     this.records.set(this.key(kind, key), {
@@ -72,11 +81,54 @@ export class MemoryOAuthState implements OAuthState {
   }
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
-    this.records.delete(this.key(kind, key));
+    const mapKey = this.key(kind, key);
+    this.records.delete(mapKey);
+    this.sets.delete(mapKey);
+  }
+
+  public async addSetMember(
+    kind: OAuthRecordKind,
+    key: string,
+    value: string,
+    ttlMs: number
+  ): Promise<void> {
+    const mapKey = this.key(kind, key);
+    const now = Date.now();
+    let record = this.sets.get(mapKey);
+    if (!record || record.expiresAt <= now) {
+      record = { values: new Set<string>(), expiresAt: now + Math.max(1, ttlMs) };
+      this.sets.set(mapKey, record);
+    }
+    record.values.add(value);
+    record.expiresAt = now + Math.max(1, ttlMs);
+  }
+
+  public async removeSetMember(kind: OAuthRecordKind, key: string, value: string): Promise<void> {
+    const mapKey = this.key(kind, key);
+    const record = this.sets.get(mapKey);
+    if (!record) return;
+    if (record.expiresAt <= Date.now()) {
+      this.sets.delete(mapKey);
+      return;
+    }
+    record.values.delete(value);
+    if (record.values.size === 0) this.sets.delete(mapKey);
+  }
+
+  public async getSetMembers(kind: OAuthRecordKind, key: string): Promise<string[]> {
+    const mapKey = this.key(kind, key);
+    const record = this.sets.get(mapKey);
+    if (!record) return [];
+    if (record.expiresAt <= Date.now()) {
+      this.sets.delete(mapKey);
+      return [];
+    }
+    return [...record.values];
   }
 
   public async close(): Promise<void> {
     this.records.clear();
+    this.sets.clear();
   }
 
   private key(kind: OAuthRecordKind, key: string): string {
@@ -122,6 +174,26 @@ export class RedisOAuthState implements OAuthState {
 
   public async delete(kind: OAuthRecordKind, key: string): Promise<void> {
     await this.redis.command("DEL", this.key(kind, key));
+  }
+
+  public async addSetMember(
+    kind: OAuthRecordKind,
+    key: string,
+    value: string,
+    ttlMs: number
+  ): Promise<void> {
+    const redisKey = this.key(kind, key);
+    await this.redis.command("SADD", redisKey, value);
+    await this.redis.command("PEXPIRE", redisKey, Math.max(1, ttlMs));
+  }
+
+  public async removeSetMember(kind: OAuthRecordKind, key: string, value: string): Promise<void> {
+    await this.redis.command("SREM", this.key(kind, key), value);
+  }
+
+  public async getSetMembers(kind: OAuthRecordKind, key: string): Promise<string[]> {
+    return redisArray(await this.redis.command("SMEMBERS", this.key(kind, key)))
+      .filter((value): value is string => typeof value === "string");
   }
 
   public async close(): Promise<void> {
