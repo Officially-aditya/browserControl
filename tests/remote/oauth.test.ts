@@ -194,7 +194,7 @@ describe("MCP OAuth for Claude", () => {
     expect(csp).not.toContain("https://claude.ai");
   });
 
-  it("supports a reverse-domain private-use callback for native Android clients", async () => {
+  it("infers a native client from a reverse-domain Android callback and completes PKCE", async () => {
     const redirectUri = "in.cuppet.app:/oauth/callback";
     const registered = await fetch(`${baseUrl}/register`, {
       method: "POST",
@@ -205,7 +205,6 @@ describe("MCP OAuth for Claude", () => {
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
-        application_type: "native",
       }),
     });
     expect(registered.status).toBe(201);
@@ -262,7 +261,7 @@ describe("MCP OAuth for Claude", () => {
     expect(await exchanged.json()).toMatchObject({ token_type: "Bearer" });
   });
 
-  it("rejects private-use callback schemes for web clients and unsafe native schemes", async () => {
+  it("rejects explicit web private-use redirects, unsafe schemes, and invalid application types", async () => {
     const webPrivateUse = await fetch(`${baseUrl}/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -288,6 +287,19 @@ describe("MCP OAuth for Claude", () => {
     });
     expect(unsafeNative.status).toBe(400);
     expect(await unsafeNative.json()).toMatchObject({ error: "invalid_redirect_uri" });
+
+    const invalidApplicationType = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_name: "Invalid app type",
+        redirect_uris: ["in.cuppet.app:/oauth/callback"],
+        token_endpoint_auth_method: "none",
+        application_type: "desktop",
+      }),
+    });
+    expect(invalidApplicationType.status).toBe(400);
+    expect(await invalidApplicationType.json()).toMatchObject({ error: "invalid_client_metadata" });
   });
 
   it("discovers OAuth, completes Claude DCR + PKCE, and reaches browser_observe", async () => {
