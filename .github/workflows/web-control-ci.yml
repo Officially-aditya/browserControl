@@ -53,6 +53,7 @@ jobs:
           node --check extension/gateway-connection.js
           node --check extension/local-connection.js
           node --check extension/oauth-bridge.js
+          node --check extension/remote-approval.js
           if [ -f extension/keyboard.js ]; then node --check extension/keyboard.js; fi
       - run: npm run build
       - name: Core tests
