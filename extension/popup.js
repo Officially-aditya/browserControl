@@ -108,6 +108,22 @@ $("copyConnector").addEventListener("click", async () => {
   }
 });
 
+$("copyConnectorToken").addEventListener("click", async () => {
+  setError();
+  const token = $("connectorToken").value;
+  if (!token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    setError("MCP token copied. Paste it only into browserControl's authorization page or an Authorization header.");
+  } catch {
+    const tokenInput = $("connectorToken");
+    tokenInput.type = "text";
+    tokenInput.select();
+    setError("Copy the selected MCP token, then keep it private.");
+    setTimeout(() => { tokenInput.type = "password"; }, 5000);
+  }
+});
+
 $("save").addEventListener("click", async () => {
   const button = $("save");
   setError();

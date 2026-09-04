@@ -14,6 +14,8 @@ import {
   type RelayPresence,
   type RelayState,
 } from "./relay-state.js";
+import { RelayOAuthService } from "./oauth.js";
+import type { OAuthState } from "./oauth-state.js";
 
 const LOCAL_DEVICE_ID = "local-development";
 const ROUTED_DEVICE_HEADER = "x-browsercontrol-routed-device";
@@ -190,6 +192,7 @@ function isAllowedForwardTarget(internalUrl: string): boolean {
 interface RoutedMcpPrincipal extends DeviceIdentity {
   token: string;
   localDevelopment?: boolean;
+  clientIdHint?: string;
 }
 
 type LocalConnection = {
@@ -218,6 +221,10 @@ export interface RemoteGatewayOptions {
   maxMcpBodySize?: number;
   trustProxy?: boolean;
   pairingAttemptsPerMinute?: number;
+  /** Public origin used for MCP OAuth discovery. Railway is auto-detected from RAILWAY_PUBLIC_DOMAIN. */
+  publicBaseUrl?: string;
+  /** Optional injected OAuth state store for tests/custom deployments. */
+  oauthState?: OAuthState;
   /** Internal runtimes can bind loopback without inheriting localhost trust semantics. */
   allowLoopbackDevelopment?: boolean;
 }
@@ -231,6 +238,8 @@ export interface RemoteGatewayHandle {
   relayState: RelayState;
   replicaId: string;
   clustered: boolean;
+  oauthEnabled: boolean;
+  oauthIssuer?: string;
   /** Loopback development credential. Empty on a public relay. */
   mcpBearerToken: string;
   adminBearerToken: string;
@@ -252,6 +261,10 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const replicaId = options.replicaId ?? process.env.BROWSERCONTROL_RELAY_REPLICA_ID ?? `${os.hostname()}-${process.pid}`;
   const configuredInternalUrl = options.relayInternalUrl ?? process.env.BROWSERCONTROL_RELAY_INTERNAL_URL ?? "";
   const trustProxy = options.trustProxy ?? process.env.BROWSERCONTROL_TRUST_PROXY === "1";
+  const railwayPublicDomain = (process.env.RAILWAY_PUBLIC_DOMAIN || "").trim();
+  const configuredPublicBaseUrl = options.publicBaseUrl
+    ?? process.env.BROWSERCONTROL_PUBLIC_BASE_URL
+    ?? (railwayPublicDomain ? `https://${railwayPublicDomain}` : "");
   const presenceTtlMs = Math.max(15_000, options.presenceTtlMs ?? Number(process.env.BROWSERCONTROL_PRESENCE_TTL_MS || 60_000));
   const clustered = !!redisUrl || (!!options.relayState && !!clusterToken);
 
@@ -287,6 +300,15 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
       ? RedisRelayState.fromUrl(redisUrl, { prefix: redisPrefix, pairingDigits: localPairing.digits })
       : new MemoryRelayState(localRegistry, localPairing)
   );
+  const oauthService = configuredPublicBaseUrl
+    ? new RelayOAuthService({
+        baseUrl: configuredPublicBaseUrl,
+        relayState,
+        state: options.oauthState,
+        redisUrl,
+        redisPrefix,
+      })
+    : null;
   const deviceRouter = new DeviceRouter(options.leaseTtlMs ?? 60_000);
   const localConnections = new Map<string, LocalConnection>();
   let effectiveInternalUrl = configuredInternalUrl ? normalizeInternalUrl(configuredInternalUrl) : "";
@@ -324,6 +346,17 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     if (!token) return null;
     const device = await relayState.authenticateMcp(token);
     if (device) return { ...device, token };
+    if (oauthService) {
+      const oauthPrincipal = await oauthService.authenticateAccessToken(token);
+      if (oauthPrincipal) {
+        return {
+          deviceId: oauthPrincipal.deviceId,
+          name: oauthPrincipal.name,
+          token,
+          clientIdHint: `oauth:${oauthPrincipal.clientId}`,
+        };
+      }
+    }
     if (localDevelopment && mcpBearerToken && safeTokenEqual(token, mcpBearerToken)) {
       return { deviceId: LOCAL_DEVICE_ID, name: "Local development", token, localDevelopment: true };
     }
@@ -432,7 +465,12 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   const handleExternalMcp = async (req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> => {
     const principal = await authenticateMcpRequest(req);
     if (!principal) {
-      writeJson(res, 401, { error: "Unauthorized: use Authorization: Bearer <mcpToken>" });
+      writeJson(
+        res,
+        401,
+        { error: "Unauthorized" },
+        oauthService ? { "WWW-Authenticate": oauthService.challengeHeader } : {}
+      );
       req.resume();
       return;
     }
@@ -448,7 +486,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
 
     const body = await readRawBody(req, maxMcpBodySize);
     const headers = copyMcpHeaders(req);
-    const clientId = requestClientId(req, principal.token);
+    const clientId = principal.clientIdHint || requestClientId(req, principal.token);
     const method = req.method || "POST";
 
     if (clustered && principal.deviceId !== LOCAL_DEVICE_ID) {
@@ -476,9 +514,15 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
         ok: true,
         replicaId,
         clustered,
+        oauthEnabled: !!oauthService,
+        oauthIssuer: oauthService?.issuer,
         connectedDevices,
         extensionConnected: connectedDevices > 0,
       });
+      return;
+    }
+
+    if (oauthService && await oauthService.handleHttp(req, res, url)) {
       return;
     }
 
@@ -653,6 +697,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     if (presenceTimer) clearInterval(presenceTimer);
     void mcpHandler.close();
     void devicePersistence?.close();
+    void oauthService?.close();
     if (ownsRelayState) void relayState.close();
   });
 
@@ -774,6 +819,7 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
   console.log(`[browserControl] Relay replica: ${replicaId}${clustered ? " (clustered)" : ""}`);
   console.log(`[browserControl] MCP endpoint: http://${host}:${actualPort}/mcp`);
   console.log(`[browserControl] Extension endpoint: ws://${host}:${actualPort}/extension`);
+  if (oauthService) console.log(`[browserControl] MCP OAuth issuer: ${oauthService.issuer}`);
 
   return {
     httpServer,
@@ -784,6 +830,8 @@ export async function runRemoteGateway(options: RemoteGatewayOptions = {}): Prom
     relayState,
     replicaId,
     clustered,
+    oauthEnabled: !!oauthService,
+    oauthIssuer: oauthService?.issuer,
     mcpBearerToken,
     adminBearerToken,
     devicePersistence,
