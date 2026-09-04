@@ -151,7 +151,7 @@ export async function startLocalExtensionServer(
     bridge.attach(socket);
 
     const keepAlive = setInterval(() => {
-      if (socket.readyState !== socket.OPEN) return;
+      if (socket.readyState !== 1) return;
       try {
         socket.send(JSON.stringify({ type: "keepalive", ts: Date.now() }));
       } catch {
