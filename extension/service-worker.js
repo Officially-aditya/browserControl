@@ -17,7 +17,7 @@ const CONTROL_SESSION_IDLE_MINUTES = 15;
 const ENROLLMENT_HEADER = "X-BrowserControl-Enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
 const TRANSPORT_LEASE_MS = 60_000;
-const AGENT_INPUT_ECHO_WINDOW_MS = 200;
+const AGENT_INPUT_ECHO_DELIVERY_TTL_MS = 1_000;
 const MUTATING_RPC_METHODS = new Set([
   "move",
   "click",
@@ -45,7 +45,12 @@ const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
   const notify = (reason) => {
-    try { globalThis.${VISUAL_INVALIDATION_BINDING}(String(reason || "user-control-input")); } catch {}
+    try {
+      globalThis.${VISUAL_INVALIDATION_BINDING}(JSON.stringify({
+        reason: String(reason || "user-control-input"),
+        at: Date.now(),
+      }));
+    } catch {}
   };
   for (const eventName of ["pointerdown", "keydown", "beforeinput", "input", "change", "wheel", "touchstart"]) {
     addEventListener(eventName, (event) => {
@@ -64,7 +69,6 @@ let lastTargetTabId = null;
 let visualEpoch = 0;
 let lastInvalidationReason = "startup";
 let lastInvalidatedAt = 0;
-let lastSuppressedAgentEchoEpoch = -1;
 let paused = false;
 let manualDisconnect = false;
 let reconnectTimer = null;
@@ -74,6 +78,7 @@ let followTabInFlight = false;
 let transportLeaseOwner = null;
 let transportLeaseExpiresAt = 0;
 const observations = new Map();
+const agentInputWindows = [];
 const MAX_OBSERVATIONS = 32;
 
 const DEFAULT_CONFIG = {
@@ -132,21 +137,61 @@ function invalidateVisualState(reason = "browser-control-action") {
   observations.clear();
 }
 
-function isDelayedAgentInputEcho(payload) {
-  if (lastSuppressedAgentEchoEpoch === visualEpoch) return false;
-  const age = Date.now() - lastInvalidatedAt;
-  if (age < 0 || age > AGENT_INPUT_ECHO_WINDOW_MS) return false;
-  const expected = {
-    "agent-click": new Set(["user-pointerdown"]),
-    "agent-double-click": new Set(["user-pointerdown"]),
-    "agent-drag": new Set(["user-pointerdown"]),
-    "agent-scroll": new Set(["user-wheel"]),
-    "agent-type": new Set(["user-beforeinput", "user-input", "user-change"]),
-    "agent-keypress": new Set(["user-keydown"]),
-  }[lastInvalidationReason];
-  if (!expected?.has(String(payload || ""))) return false;
-  lastSuppressedAgentEchoEpoch = visualEpoch;
-  return true;
+function inputEchoReasons(method, params = {}) {
+  if (method === "Input.dispatchMouseEvent") {
+    if (params.type === "mousePressed") return new Set(["user-pointerdown"]);
+    if (params.type === "mouseWheel") return new Set(["user-wheel"]);
+  }
+  if (method === "Input.insertText") return new Set(["user-beforeinput", "user-input"]);
+  if (method === "Input.dispatchKeyEvent" && ["keyDown", "rawKeyDown"].includes(params.type)) {
+    return new Set(["user-keydown"]);
+  }
+  return null;
+}
+
+function beginAgentInputWindow(method, params = {}) {
+  const reasons = inputEchoReasons(method, params);
+  if (!reasons) return null;
+  const window = { reasons, startedAt: Date.now(), endedAt: Infinity };
+  agentInputWindows.push(window);
+  return window;
+}
+
+function endAgentInputWindow(window) {
+  if (window) window.endedAt = Date.now();
+}
+
+function parseVisualInvalidationPayload(payload) {
+  const raw = String(payload || "");
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return {
+        reason: String(parsed.reason || "user-control-input"),
+        at: Number.isFinite(Number(parsed.at)) ? Number(parsed.at) : Date.now(),
+      };
+    }
+  } catch {}
+  return { reason: raw || "user-control-input", at: Date.now() };
+}
+
+function consumeAgentInputEcho(event) {
+  const now = Date.now();
+  for (let i = agentInputWindows.length - 1; i >= 0; i--) {
+    const window = agentInputWindows[i];
+    const expired = Number.isFinite(window.endedAt)
+      && now - window.endedAt > AGENT_INPUT_ECHO_DELIVERY_TTL_MS;
+    if (expired || window.reasons.size === 0) {
+      agentInputWindows.splice(i, 1);
+      continue;
+    }
+    if (!window.reasons.has(event.reason)) continue;
+    if (event.at < window.startedAt || event.at > window.endedAt) continue;
+    window.reasons.delete(event.reason);
+    if (window.reasons.size === 0) agentInputWindows.splice(i, 1);
+    return true;
+  }
+  return false;
 }
 
 function isControllableWebTab(tab) {
@@ -288,7 +333,12 @@ async function ensureAttached() {
 
 async function send(method, params = {}) {
   const tabId = await ensureAttached();
-  return chrome.debugger.sendCommand({ tabId }, method, params);
+  const inputWindow = beginAgentInputWindow(method, params);
+  try {
+    return await chrome.debugger.sendCommand({ tabId }, method, params);
+  } finally {
+    endAgentInputWindow(inputWindow);
+  }
 }
 
 async function viewport() {
@@ -925,8 +975,9 @@ async function noteActiveTarget(tabId) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== attachedTabId) return;
   if (method === "Runtime.bindingCalled" && params?.name === VISUAL_INVALIDATION_BINDING) {
-    if (isDelayedAgentInputEcho(params?.payload)) return;
-    invalidateVisualState(params?.payload || "user-control-input");
+    const event = parseVisualInvalidationPayload(params?.payload);
+    if (consumeAgentInputEcho(event)) return;
+    invalidateVisualState(event.reason);
     return;
   }
   if (method === "Page.frameNavigated") {
