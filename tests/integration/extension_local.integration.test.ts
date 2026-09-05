@@ -118,7 +118,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     expect(afterClicks).toBeGreaterThan(beforeClicks);
   });
 
-  it("rejects stale observations locally with the same semantics as remote", async () => {
+  it("keeps observations usable across passive DOM churn", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -129,10 +129,36 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     await controller.session.send("Runtime.evaluate", {
       expression: `(() => {
         const marker = document.createElement("div");
-        marker.id = "external-local-change-marker";
-        marker.textContent = "changed outside local browserControl";
+        marker.id = "passive-local-change-marker";
+        marker.textContent = "passive app render";
         document.body.appendChild(marker);
       })()`,
+      returnByValue: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const clicked = await client.callTool({
+      name: "browser_click",
+      arguments: {
+        observationId: metadata.observationId,
+        x: 68,
+        y: 151,
+        button: "left",
+      },
+    });
+    expect(clicked.isError).toBeFalsy();
+  });
+
+  it("still rejects an observation after a user-originated interaction", async () => {
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
+    });
+    expect(observation.isError).toBeFalsy();
+    const metadata = JSON.parse((observation.content[0] as any).text);
+
+    await controller.session.send("Runtime.evaluate", {
+      expression: `document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 400, clientY: 300 }))`,
       returnByValue: true,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -148,5 +174,40 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     });
     expect(stale.isError).toBe(true);
     expect((stale.content[0] as any).text).toContain("STALE_OBSERVATION");
+  });
+
+  it("bootstraps an http(s) navigation directly from a fresh blank tab", async () => {
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
+    });
+    expect(observation.isError).toBeFalsy();
+    const metadata = JSON.parse((observation.content[0] as any).text);
+
+    const blank = await client.callTool({
+      name: "browser_new_tab",
+      arguments: { observationId: metadata.observationId },
+    });
+    expect(blank.isError).toBeFalsy();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const status = await client.callTool({ name: "browser_status", arguments: {} });
+    expect(status.isError).toBeFalsy();
+    const statusPayload = JSON.parse((status.content[0] as any).text);
+    expect(statusPayload.extension.activeTab?.bootstrap).toBe(true);
+
+    const navigated = await client.callTool({
+      name: "browser_navigate",
+      arguments: { url: `${fixture.url}/interactive.html` },
+    });
+    expect(navigated.isError).toBeFalsy();
+
+    const after = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
+    });
+    expect(after.isError).toBeFalsy();
+    const afterMetadata = JSON.parse((after.content[0] as any).text);
+    expect(afterMetadata.url).toContain("/interactive.html");
   });
 });

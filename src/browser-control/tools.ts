@@ -45,7 +45,7 @@ function textResult(value: unknown) {
 
 export function browserTools(): Tool[] {
   return [
-    { name: "browser_status", description: "Check this browserControl device, shared-tab state, local pause state, and exclusive-control lease status.", inputSchema: EMPTY_SCHEMA },
+    { name: "browser_status", description: "Check this browserControl device, active-tab/bootstrap state, shared-tab state, local pause state, and exclusive-control lease status.", inputSchema: EMPTY_SCHEMA },
     {
       name: "browser_observe",
       description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values and mutating actions must reference the returned observationId.",
@@ -124,7 +124,7 @@ export function browserTools(): Tool[] {
     },
     { name: "browser_type", description: "Insert text into the focused element only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
     { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
-    { name: "browser_navigate", description: "Navigate the currently shared tab to an http(s) URL from a fresh observation. Only http:// and https:// are allowed.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["observationId", "url"], additionalProperties: false } },
+    { name: "browser_navigate", description: "Navigate to an http(s) URL. On a normal shared web tab, observationId is required and must be fresh. On the active Chrome New Tab/about:blank bootstrap page, observationId may be omitted.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["url"], additionalProperties: false } },
     { name: "browser_back", description: "Navigate backward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
     { name: "browser_forward", description: "Navigate forward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
     { name: "browser_reload", description: "Reload the shared tab from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },

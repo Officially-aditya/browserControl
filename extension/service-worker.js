@@ -44,27 +44,15 @@ const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
   let timer = null;
-  const notify = () => {
+  const notify = (reason) => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
-      try { globalThis.${VISUAL_INVALIDATION_BINDING}("visual-change"); } catch {}
+      try { globalThis.${VISUAL_INVALIDATION_BINDING}(String(reason || "user-visual-change")); } catch {}
     }, 50);
   };
-  const observer = new MutationObserver(notify);
-  const start = () => {
-    if (!document.documentElement) return;
-    observer.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      characterData: true,
-    });
-  };
-  start();
-  if (!document.documentElement) addEventListener("DOMContentLoaded", start, { once: true });
-  for (const eventName of ["pointerdown", "pointermove", "keydown", "input", "change", "scroll", "resize"]) {
-    addEventListener(eventName, notify, true);
+  for (const eventName of ["pointerdown", "keydown", "input", "change", "scroll", "resize"]) {
+    addEventListener(eventName, () => notify("user-" + eventName), true);
   }
 })();`;
 
@@ -147,6 +135,12 @@ function isControllableWebTab(tab) {
   }
 }
 
+function isBootstrapTab(tab) {
+  if (!tab?.id) return false;
+  const url = String(tab.url || "");
+  return !url || url === "about:blank" || url.startsWith("chrome://newtab") || url.startsWith("chrome://new-tab-page");
+}
+
 function isControlSurfaceTab(tab) {
   if (!isControllableWebTab(tab)) return false;
   try {
@@ -192,7 +186,7 @@ async function preferredTargetTab() {
     }
   }
 
-  const error = new Error("Open the web page you want browserControl to use, then return to Claude or ChatGPT and try again");
+  const error = new Error("Open a web page or ask the agent to navigate the active Chrome New Tab page");
   error.code = "NO_TARGET_TAB";
   throw error;
 }
@@ -500,13 +494,45 @@ function assertSafeNewTabUrl(rawUrl) {
   return assertSafeNavigationUrl(rawUrl);
 }
 
+async function waitForEligibleTarget(tabId) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab && isEligibleTargetTab(tab)) return tab;
+    if (tab && isControlSurfaceTab(tab)) {
+      const error = new Error("browserControl cannot bootstrap navigation into an AI control surface");
+      error.code = "TAB_NOT_CONTROLLABLE";
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const error = new Error("The New Tab page did not become a controllable web page after navigation");
+  error.code = "NAVIGATION_FAILED";
+  throw error;
+}
+
 async function navigate(params) {
-  assertFresh(params.observationId);
   if (!params.url) throw new Error("url is required");
   const safeUrl = assertSafeNavigationUrl(params.url);
-  await send("Page.navigate", { url: safeUrl });
-  invalidateVisualState();
-  return { success: true, visualEpoch, url: safeUrl };
+
+  if (params.observationId) {
+    assertFresh(params.observationId);
+    await send("Page.navigate", { url: safeUrl });
+    invalidateVisualState();
+    return { success: true, visualEpoch, url: safeUrl, bootstrap: false };
+  }
+
+  const tab = await activeTab();
+  if (!isBootstrapTab(tab)) {
+    const error = new Error("observationId is required unless the active tab is Chrome New Tab/about:blank");
+    error.code = "OBSERVATION_REQUIRED";
+    throw error;
+  }
+  if (attachedTabId != null && attachedTabId !== tab.id) await detach(false);
+  await chrome.tabs.update(tab.id, { url: safeUrl, active: true });
+  const target = await waitForEligibleTarget(tab.id);
+  await attach(target.id);
+  return { success: true, visualEpoch, url: safeUrl, bootstrap: true, targetId: String(target.id) };
 }
 
 async function historyAction(params, direction) {
@@ -528,7 +554,7 @@ async function reload(params) {
 
 async function listTabs() {
   const tabs = await chrome.tabs.query({});
-  return tabs.map((tab) => ({ targetId: String(tab.id), windowId: tab.windowId, active: tab.active, title: tab.title || "", url: tab.url || "" }));
+  return tabs.map((tab) => ({ targetId: String(tab.id), windowId: tab.windowId, active: tab.active, title: tab.title || "", url: tab.url || "", bootstrap: isBootstrapTab(tab) }));
 }
 
 async function switchTab(params) {
@@ -602,19 +628,29 @@ async function handleRpc(request, source = "remote") {
   claimTransportLease(source, request.method);
   if (request.method !== "status") await touchControlSession();
   switch (request.method) {
-    case "status": return {
-      attachedTabId,
-      visualEpoch,
-      paused,
-      connected: anyTransportConnected(),
-      localConnected,
-      remoteConnected: remoteConnected(),
-      manualDisconnect,
-      transportLease: {
-        owner: transportLeaseOwner,
-        expiresAt: transportLeaseExpiresAt,
-      },
-    };
+    case "status": {
+      const active = await activeTab().catch(() => null);
+      return {
+        attachedTabId,
+        visualEpoch,
+        paused,
+        connected: anyTransportConnected(),
+        localConnected,
+        remoteConnected: remoteConnected(),
+        manualDisconnect,
+        activeTab: active ? {
+          targetId: String(active.id),
+          title: active.title || "",
+          url: active.url || "",
+          bootstrap: isBootstrapTab(active),
+          controllable: isEligibleTargetTab(active),
+        } : null,
+        transportLease: {
+          owner: transportLeaseOwner,
+          expiresAt: transportLeaseExpiresAt,
+        },
+      };
+    }
     case "observe": return observe(request.params || {});
     case "inspect_region": return inspectRegion(request.params || {});
     case "move": return mouseMove(request.params || {});
