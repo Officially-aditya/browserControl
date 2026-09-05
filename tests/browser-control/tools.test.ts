@@ -76,6 +76,36 @@ describe("canonical browserControl tools", () => {
     expect(JSON.parse(result.content[0].text).errorCode).toBe("UNSAFE_NAVIGATION_URL");
   });
 
+  it("keeps deterministic recovery tools callable without observations", () => {
+    const tools = new Map(browserTools().map((tool) => [tool.name, tool]));
+    expect((tools.get("browser_navigate")?.inputSchema as any).required).toEqual(["url"]);
+    expect((tools.get("browser_reload")?.inputSchema as any).required).toBeUndefined();
+    expect((tools.get("browser_back")?.inputSchema as any).required).toBeUndefined();
+    expect((tools.get("browser_forward")?.inputSchema as any).required).toBeUndefined();
+    expect((tools.get("browser_switch_tab")?.inputSchema as any).required).toEqual(["targetId"]);
+    expect((tools.get("browser_new_tab")?.inputSchema as any).required).toBeUndefined();
+  });
+
+  it("passes recovery calls through even when no observation is supplied", async () => {
+    const route = fakeRoute();
+    const navigated = await handleBrowserToolCall(route, "client-a", "browser_navigate", {
+      url: "https://example.com/",
+    });
+    const reloaded = await handleBrowserToolCall(route, "client-a", "browser_reload", {});
+    const opened = await handleBrowserToolCall(route, "client-a", "browser_new_tab", {
+      url: "https://example.com/compose",
+    });
+
+    expect(navigated.isError).toBeUndefined();
+    expect(reloaded.isError).toBeUndefined();
+    expect(opened.isError).toBeUndefined();
+    expect((route.bridge.call as any).mock.calls).toEqual([
+      ["navigate", { url: "https://example.com/" }],
+      ["reload", {}],
+      ["new_tab", { url: "https://example.com/compose" }],
+    ]);
+  });
+
   it("keeps the interactive lease transport independent", async () => {
     const route = fakeRoute();
     await handleBrowserToolCall(route, "client-a", "browser_click", {
