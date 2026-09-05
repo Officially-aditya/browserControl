@@ -44,13 +44,8 @@ const CONTROL_SURFACE_HOSTS = new Set([
 const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
-  let timer = null;
   const notify = (reason) => {
-    if (timer) return;
-    timer = setTimeout(() => {
-      timer = null;
-      try { globalThis.${VISUAL_INVALIDATION_BINDING}(String(reason || "user-control-input")); } catch {}
-    }, 50);
+    try { globalThis.${VISUAL_INVALIDATION_BINDING}(String(reason || "user-control-input")); } catch {}
   };
   for (const eventName of ["pointerdown", "keydown", "beforeinput", "input", "change", "wheel", "touchstart"]) {
     addEventListener(eventName, (event) => {
