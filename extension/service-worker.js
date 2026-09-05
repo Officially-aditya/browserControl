@@ -930,10 +930,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
   if (method === "Page.javascriptDialogOpening") {
     invalidateVisualState("javascript-dialog-opened");
-    return;
-  }
-  if (method === "Page.frameResized") {
-    invalidateVisualState("viewport-resized");
   }
 });
 
@@ -958,6 +954,13 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
     if (!tab?.id) return;
     void noteActiveTarget(tab.id);
     if (attachedTabId != null && !paused) return followActiveTabIfNeeded(tab.id);
+  }).catch(() => undefined);
+});
+
+chrome.windows.onBoundsChanged.addListener((window) => {
+  if (attachedTabId == null || !Number.isInteger(window?.id)) return;
+  void chrome.tabs.get(attachedTabId).then((tab) => {
+    if (tab?.windowId === window.id) invalidateVisualState("window-resized");
   }).catch(() => undefined);
 });
 
