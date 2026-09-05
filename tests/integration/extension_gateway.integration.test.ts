@@ -341,7 +341,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     expect(click.isError).toBeFalsy();
   });
 
-  it("still rejects a remote observation after user-originated interaction", async () => {
+  it("still rejects a remote observation after trusted user-like interaction", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -349,9 +349,19 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     expect(observation.isError).toBeFalsy();
     const metadata = JSON.parse((observation.content[0] as any).text);
 
-    await controller.session.send("Runtime.evaluate", {
-      expression: `document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 400, clientY: 300 }))`,
-      returnByValue: true,
+    await controller.session.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: 400,
+      y: 300,
+      button: "left",
+      clickCount: 1,
+    });
+    await controller.session.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: 400,
+      y: 300,
+      button: "left",
+      clickCount: 1,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
 
