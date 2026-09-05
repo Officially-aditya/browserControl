@@ -9,6 +9,11 @@ const OBSERVATION_SCHEMA = {
   required: ["observationId"],
   additionalProperties: false,
 };
+const OPTIONAL_OBSERVATION_SCHEMA = {
+  type: "object" as const,
+  properties: { observationId: { type: "string" } },
+  additionalProperties: false,
+};
 const POINT_PROPERTIES = {
   observationId: { type: "string" },
   x: { type: "number", minimum: 0, maximum: 1000 },
@@ -45,10 +50,10 @@ function textResult(value: unknown) {
 
 export function browserTools(): Tool[] {
   return [
-    { name: "browser_status", description: "Check this browserControl device, active-tab/bootstrap state, shared-tab state, local pause state, and exclusive-control lease status.", inputSchema: EMPTY_SCHEMA },
+    { name: "browser_status", description: "Check this browserControl device, active-tab/bootstrap state, shared-tab state, latest freshness invalidation reason, local pause state, and exclusive-control lease status.", inputSchema: EMPTY_SCHEMA },
     {
       name: "browser_observe",
-      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values and mutating actions must reference the returned observationId.",
+      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values. Visual/focus-dependent actions such as click, type, drag, and scroll must reference the returned observationId.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -108,7 +113,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_scroll",
-      description: "Scroll at normalized coordinates using CSS-pixel wheel deltas.",
+      description: "Scroll at normalized coordinates using CSS-pixel wheel deltas from a fresh observation.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -124,13 +129,13 @@ export function browserTools(): Tool[] {
     },
     { name: "browser_type", description: "Insert text into the focused element only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
     { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
-    { name: "browser_navigate", description: "Navigate to an http(s) URL. On a normal shared web tab, observationId is required and must be fresh. On the active Chrome New Tab/about:blank bootstrap page, observationId may be omitted.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["url"], additionalProperties: false } },
-    { name: "browser_back", description: "Navigate backward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
-    { name: "browser_forward", description: "Navigate forward from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
-    { name: "browser_reload", description: "Reload the shared tab from a fresh observation.", inputSchema: OBSERVATION_SCHEMA },
+    { name: "browser_navigate", description: "Navigate the shared tab to an http(s) URL. This deterministic recovery action does not require a fresh observation, including on dynamic pages and Chrome New Tab/about:blank.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["url"], additionalProperties: false } },
+    { name: "browser_back", description: "Navigate the shared tab backward. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
+    { name: "browser_forward", description: "Navigate the shared tab forward. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
+    { name: "browser_reload", description: "Reload the shared tab. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
     { name: "browser_tabs", description: "List Chrome tabs visible to this browserControl device. Read-only.", inputSchema: EMPTY_SCHEMA },
-    { name: "browser_switch_tab", description: "Switch control to a tab returned by browser_tabs from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string", maxLength: 128 } }, required: ["observationId", "targetId"], additionalProperties: false } },
-    { name: "browser_new_tab", description: "Create a new tab from a fresh observation. Only http://, https://, or about:blank.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["observationId"], additionalProperties: false } },
+    { name: "browser_switch_tab", description: "Switch control to an explicit targetId returned by browser_tabs. No observation is required because the target tab is explicit.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string", maxLength: 128 } }, required: ["targetId"], additionalProperties: false } },
+    { name: "browser_new_tab", description: "Create a new tab. No observation is required. Only http://, https://, or about:blank are allowed.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, additionalProperties: false } },
     { name: "browser_close_tab", description: "Close a tab from a fresh observation. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string", maxLength: 128 } }, required: ["observationId"], additionalProperties: false } },
     { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, accept: { type: "boolean" }, promptText: { type: "string", maxLength: 5000 } }, required: ["observationId", "accept"], additionalProperties: false } },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the browserControl device.", inputSchema: EMPTY_SCHEMA },

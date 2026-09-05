@@ -149,7 +149,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     expect(clicked.isError).toBeFalsy();
   });
 
-  it("still rejects an observation after a user-originated interaction", async () => {
+  it("ignores background child-frame navigation churn when visible geometry is unchanged", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -158,8 +158,58 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     const metadata = JSON.parse((observation.content[0] as any).text);
 
     await controller.session.send("Runtime.evaluate", {
-      expression: `document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 400, clientY: 300 }))`,
+      expression: `(() => {
+        const frame = document.createElement("iframe");
+        frame.id = "background-media-frame";
+        frame.style.display = "none";
+        frame.src = ${JSON.stringify("about:blank")};
+        document.body.appendChild(frame);
+        setTimeout(() => { frame.src = ${JSON.stringify("data:text/html,<p>media churn</p>")}; }, 25);
+      })()`,
       returnByValue: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const status = await client.callTool({ name: "browser_status", arguments: {} });
+    expect(status.isError).toBeFalsy();
+    const statusPayload = JSON.parse((status.content[0] as any).text);
+
+    const clicked = await client.callTool({
+      name: "browser_click",
+      arguments: {
+        observationId: metadata.observationId,
+        x: 68,
+        y: 151,
+        button: "left",
+      },
+    });
+    if (clicked.isError) {
+      throw new Error(`background frame churn unexpectedly invalidated observation: ${(clicked.content[0] as any)?.text}; last reason=${statusPayload.extension?.lastInvalidationReason}`);
+    }
+    expect(clicked.isError).toBeFalsy();
+  });
+
+  it("still rejects an observation after a trusted user-like interaction", async () => {
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
+    });
+    expect(observation.isError).toBeFalsy();
+    const metadata = JSON.parse((observation.content[0] as any).text);
+
+    await controller.session.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: 400,
+      y: 300,
+      button: "left",
+      clickCount: 1,
+    });
+    await controller.session.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: 400,
+      y: 300,
+      button: "left",
+      clickCount: 1,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
 
@@ -176,7 +226,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     expect((stale.content[0] as any).text).toContain("STALE_OBSERVATION");
   });
 
-  it("bootstraps an http(s) navigation directly from a fresh blank tab", async () => {
+  it("lets deterministic recovery commands escape a stale observation", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -184,9 +234,39 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     expect(observation.isError).toBeFalsy();
     const metadata = JSON.parse((observation.content[0] as any).text);
 
+    await controller.session.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: 450,
+      y: 320,
+      button: "left",
+      clickCount: 1,
+    });
+    await controller.session.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: 450,
+      y: 320,
+      button: "left",
+      clickCount: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const staleClick = await client.callTool({
+      name: "browser_click",
+      arguments: { observationId: metadata.observationId, x: 68, y: 151, button: "left" },
+    });
+    expect(staleClick.isError).toBe(true);
+
+    const reload = await client.callTool({
+      name: "browser_reload",
+      arguments: { observationId: metadata.observationId },
+    });
+    expect(reload.isError).toBeFalsy();
+  });
+
+  it("bootstraps an http(s) navigation directly from a fresh blank tab", async () => {
     const blank = await client.callTool({
       name: "browser_new_tab",
-      arguments: { observationId: metadata.observationId },
+      arguments: {},
     });
     expect(blank.isError).toBeFalsy();
     await new Promise((resolve) => setTimeout(resolve, 150));
