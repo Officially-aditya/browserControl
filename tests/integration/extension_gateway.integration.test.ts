@@ -315,7 +315,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
     expect(afterClicks).toBeGreaterThan(beforeClicks);
   });
 
-  it("rejects an observation after the page changes outside browserControl", async () => {
+  it("keeps a remote observation usable across passive DOM churn", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -327,9 +327,30 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> WSS gateway -> MCP 
       expression: `(() => {
         const marker = document.createElement("div");
         marker.id = "external-change-marker";
-        marker.textContent = "changed outside browserControl";
+        marker.textContent = "passive page churn";
         document.body.appendChild(marker);
       })()`,
+      returnByValue: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const click = await client.callTool({
+      name: "browser_click",
+      arguments: { observationId: metadata.observationId, x: 68, y: 151, button: "left" },
+    });
+    expect(click.isError).toBeFalsy();
+  });
+
+  it("still rejects a remote observation after user-originated interaction", async () => {
+    const observation = await client.callTool({
+      name: "browser_observe",
+      arguments: { format: "jpeg", maxLongEdge: 640 },
+    });
+    expect(observation.isError).toBeFalsy();
+    const metadata = JSON.parse((observation.content[0] as any).text);
+
+    await controller.session.send("Runtime.evaluate", {
+      expression: `document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 400, clientY: 300 }))`,
       returnByValue: true,
     });
     await new Promise((resolve) => setTimeout(resolve, 150));
