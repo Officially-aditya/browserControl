@@ -50,10 +50,10 @@ function textResult(value: unknown) {
 
 export function browserTools(): Tool[] {
   return [
-    { name: "browser_status", description: "Check this browserControl device, active-tab/bootstrap state, shared-tab state, latest freshness invalidation reason, local pause state, and exclusive-control lease status.", inputSchema: EMPTY_SCHEMA },
+    { name: "browser_status", description: "Check this browserControl device, active-tab/bootstrap state, logical browser pointer position/source, latest freshness invalidation reason, local pause state, and exclusive-control lease status. Pointer coordinates are viewport-normalized 0-1000 and describe browserControl's logical pointer, not the OS cursor.", inputSchema: EMPTY_SCHEMA },
     {
       name: "browser_observe",
-      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values. Visual/focus-dependent actions such as click, type, drag, and scroll must reference the returned observationId.",
+      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values. Metadata includes the current logical browser pointer position/source when known. Visual/focus-dependent actions such as click, type, drag, and scroll must reference the returned observationId.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -66,7 +66,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_inspect",
-      description: "Capture a higher-detail sub-region of an observation. The returned crop has its own normalized 0-1000 coordinate space mapped back to the source viewport.",
+      description: "Capture a higher-detail sub-region of an observation. The returned crop has its own normalized 0-1000 coordinate space mapped back to the source viewport. Pointer metadata remains viewport-normalized rather than crop-relative.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -82,12 +82,12 @@ export function browserTools(): Tool[] {
         additionalProperties: false,
       },
     },
-    { name: "browser_move", description: "Move/hover at normalized coordinates from a specific observation.", inputSchema: { type: "object" as const, properties: POINT_PROPERTIES, required: ["observationId", "x", "y"], additionalProperties: false } },
-    { name: "browser_click", description: "Click at normalized coordinates from a specific observation. Stale observations are rejected.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
-    { name: "browser_double_click", description: "Double-click at normalized coordinates from a specific observation.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
+    { name: "browser_move", description: "Move/hover the logical browser pointer at normalized coordinates from a specific observation. The action updates pointer state for later status/observation calls.", inputSchema: { type: "object" as const, properties: POINT_PROPERTIES, required: ["observationId", "x", "y"], additionalProperties: false } },
+    { name: "browser_click", description: "Click at normalized coordinates from a specific observation and update the logical pointer position. Stale observations are rejected.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
+    { name: "browser_double_click", description: "Double-click at normalized coordinates from a specific observation and update the logical pointer position.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
     {
       name: "browser_drag",
-      description: "Drag through a normalized waypoint path planned against one observation.",
+      description: "Drag through a normalized waypoint path planned against one observation. Logical pointer state finishes at the final waypoint.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -113,7 +113,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_scroll",
-      description: "Scroll at normalized coordinates using CSS-pixel wheel deltas from a fresh observation.",
+      description: "Scroll at normalized coordinates using CSS-pixel wheel deltas from a fresh observation. The wheel position becomes the logical browser pointer position.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -241,7 +241,7 @@ export function createBrowserControlMcpServer(
   options: { name?: string; version?: string } = {},
 ): Server {
   const server = new Server(
-    { name: options.name || "browser-control", version: options.version || "0.7.0" },
+    { name: options.name || "browser-control", version: options.version || "0.7.1" },
     { capabilities: { tools: {} } },
   );
   server.setRequestHandler("tools/list", async () => ({ tools: browserTools() }));
