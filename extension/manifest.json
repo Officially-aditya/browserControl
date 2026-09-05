@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "browserControl",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Securely connect local or remote AI clients to your existing Chrome through browserControl.",
   "minimum_chrome_version": "116",
   "permissions": ["debugger", "tabs", "storage", "activeTab", "alarms"],

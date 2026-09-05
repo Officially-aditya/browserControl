@@ -18,6 +18,7 @@ const ENROLLMENT_HEADER = "X-BrowserControl-Enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
 const TRANSPORT_LEASE_MS = 60_000;
 const AGENT_INPUT_ECHO_DELIVERY_TTL_MS = 1_000;
+const POINTER_EVENT_THROTTLE_MS = 33;
 const MUTATING_RPC_METHODS = new Set([
   "move",
   "click",
@@ -44,18 +45,38 @@ const CONTROL_SURFACE_HOSTS = new Set([
 const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
-  const notify = (reason) => {
+  let lastPointerSentAt = 0;
+  const notify = (payload) => {
     try {
       globalThis.${VISUAL_INVALIDATION_BINDING}(JSON.stringify({
-        reason: String(reason || "user-control-input"),
         at: Date.now(),
+        ...payload,
       }));
     } catch {}
   };
+  const pointerPayload = (event, reason, kind = "input") => ({
+    kind,
+    reason,
+    x: Number(event?.clientX),
+    y: Number(event?.clientY),
+    viewportWidth: Number(globalThis.innerWidth),
+    viewportHeight: Number(globalThis.innerHeight),
+  });
+  addEventListener("pointermove", (event) => {
+    if (event?.isTrusted === false) return;
+    const now = Date.now();
+    if (now - lastPointerSentAt < ${POINTER_EVENT_THROTTLE_MS}) return;
+    lastPointerSentAt = now;
+    notify(pointerPayload(event, "user-pointermove", "pointer"));
+  }, true);
   for (const eventName of ["pointerdown", "keydown", "beforeinput", "input", "change", "wheel", "touchstart"]) {
     addEventListener(eventName, (event) => {
       if (event?.isTrusted === false) return;
-      notify("user-" + eventName);
+      if (eventName === "pointerdown" || eventName === "wheel") {
+        notify(pointerPayload(event, "user-" + eventName));
+        return;
+      }
+      notify({ kind: "input", reason: "user-" + eventName });
     }, true);
   }
 })();`;
@@ -69,6 +90,7 @@ let lastTargetTabId = null;
 let visualEpoch = 0;
 let lastInvalidationReason = "startup";
 let lastInvalidatedAt = 0;
+let pointerState = null;
 let paused = false;
 let manualDisconnect = false;
 let reconnectTimer = null;
@@ -137,8 +159,46 @@ function invalidateVisualState(reason = "browser-control-action") {
   observations.clear();
 }
 
+function clamp1000(value) {
+  return Math.max(0, Math.min(1000, value));
+}
+
+function clearPointer() {
+  pointerState = null;
+}
+
+function setPointerFromViewport(x, y, viewportWidth, viewportHeight, source, updatedAt = Date.now(), tabId = attachedTabId) {
+  const px = Number(x);
+  const py = Number(y);
+  const width = Number(viewportWidth);
+  const height = Number(viewportHeight);
+  if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 || !Number.isInteger(tabId)) return;
+  pointerState = {
+    known: true,
+    x: clamp1000((px / width) * 1000),
+    y: clamp1000((py / height) * 1000),
+    coordinateSpace: "viewport_normalized_1000",
+    insideViewport: px >= 0 && py >= 0 && px <= width && py <= height,
+    source: source === "user" ? "user" : "agent",
+    updatedAt: Number.isFinite(Number(updatedAt)) ? Number(updatedAt) : Date.now(),
+    targetId: String(tabId),
+  };
+}
+
+function setPointerFromRecordPoint(point, record, source = "agent") {
+  setPointerFromViewport(point.x, point.y, record.viewportWidth, record.viewportHeight, source, Date.now(), record.tabId);
+}
+
+function pointerMetadata() {
+  if (!pointerState || String(attachedTabId) !== pointerState.targetId) {
+    return { known: false, coordinateSpace: "viewport_normalized_1000" };
+  }
+  return { ...pointerState };
+}
+
 function inputEchoReasons(method, params = {}) {
   if (method === "Input.dispatchMouseEvent") {
+    if (params.type === "mouseMoved") return new Set(["user-pointermove"]);
     if (params.type === "mousePressed") return new Set(["user-pointerdown"]);
     if (params.type === "mouseWheel") return new Set(["user-wheel"]);
   }
@@ -167,12 +227,17 @@ function parseVisualInvalidationPayload(payload) {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
       return {
+        kind: String(parsed.kind || "input"),
         reason: String(parsed.reason || "user-control-input"),
         at: Number.isFinite(Number(parsed.at)) ? Number(parsed.at) : Date.now(),
+        x: Number(parsed.x),
+        y: Number(parsed.y),
+        viewportWidth: Number(parsed.viewportWidth),
+        viewportHeight: Number(parsed.viewportHeight),
       };
     }
   } catch {}
-  return { reason: raw || "user-control-input", at: Date.now() };
+  return { kind: "input", reason: raw || "user-control-input", at: Date.now() };
 }
 
 function consumeAgentInputEcho(event) {
@@ -287,6 +352,7 @@ async function attach(tabId) {
   await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   attachedTabId = tabId;
   attachedMainFrameId = null;
+  clearPointer();
   invalidateVisualState("tab-attached");
   try {
     await chrome.debugger.sendCommand({ tabId }, "Page.enable");
@@ -298,6 +364,7 @@ async function attach(tabId) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
     attachedTabId = null;
     attachedMainFrameId = null;
+    clearPointer();
     invalidateVisualState("attach-failed");
     throw error;
   }
@@ -309,6 +376,7 @@ async function detach(updateStatus = true) {
   const tabId = attachedTabId;
   attachedTabId = null;
   attachedMainFrameId = null;
+  clearPointer();
   invalidateVisualState("tab-detached");
   if (tabId != null) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
@@ -429,7 +497,7 @@ async function observe(params = {}) {
   });
   const observationId = `${tabId}:${visualEpoch}:${crypto.randomUUID()}`;
   const sourceRegion = { x: 0, y: 0, width: vp.width, height: vp.height };
-  rememberObservation({ observationId, tabId, visualEpoch, sourceRegion });
+  rememberObservation({ observationId, tabId, visualEpoch, sourceRegion, viewportWidth: vp.width, viewportHeight: vp.height });
   return {
     observationId,
     visualEpoch,
@@ -442,6 +510,7 @@ async function observe(params = {}) {
     imageHeight: Math.max(1, Math.round(vp.height * scale)),
     imageScale: scale,
     sourceRegion,
+    pointer: pointerMetadata(),
     kind: "overview",
     coordinateSpace: "normalized_1000",
     mimeType: mimeType(format),
@@ -469,7 +538,7 @@ async function inspectRegion(params = {}) {
     },
   });
   const observationId = `${attachedTabId}:${visualEpoch}:${crypto.randomUUID()}`;
-  rememberObservation({ observationId, tabId: attachedTabId, visualEpoch, sourceRegion: region });
+  rememberObservation({ observationId, tabId: attachedTabId, visualEpoch, sourceRegion: region, viewportWidth: vp.width, viewportHeight: vp.height });
   return {
     observationId,
     sourceObservationId: params.observationId,
@@ -479,6 +548,7 @@ async function inspectRegion(params = {}) {
     imageHeight: Math.round(region.height),
     imageScale: 1,
     sourceRegion: region,
+    pointer: pointerMetadata(),
     kind: "region",
     coordinateSpace: "normalized_1000",
     mimeType: mimeType(format),
@@ -490,8 +560,9 @@ async function mouseMove(params) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y, button: "none" });
+  setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState("agent-move");
-  return { success: true, visualEpoch };
+  return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
 
 async function mouseClick(params, clickCount = 1) {
@@ -500,8 +571,9 @@ async function mouseClick(params, clickCount = 1) {
   const button = params.button || "left";
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount });
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, clickCount });
+  setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
-  return { success: true, visualEpoch };
+  return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
 
 async function drag(params) {
@@ -517,8 +589,9 @@ async function drag(params) {
   }
   const last = points[points.length - 1];
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: last.x, y: last.y, button: "left", clickCount: 1 });
+  setPointerFromRecordPoint(last, record, "agent");
   invalidateVisualState("agent-drag");
-  return { success: true, visualEpoch };
+  return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
 
 async function scroll(params) {
@@ -529,8 +602,9 @@ async function scroll(params) {
   if (Math.abs(deltaX) > 4000 || Math.abs(deltaY) > 4000) throw new Error("scroll deltas must be within ±4000");
   const p = normalizedPointToSource(params.x ?? 500, params.y ?? 500, record);
   await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX, deltaY });
+  setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState("agent-scroll");
-  return { success: true, visualEpoch };
+  return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
 
 async function typeText(params) {
@@ -658,6 +732,7 @@ async function closeTab(params = {}) {
   if (tabId === attachedTabId) {
     attachedTabId = null;
     attachedMainFrameId = null;
+    clearPointer();
     invalidateVisualState("agent-close-tab");
   }
   return { success: true, visualEpoch };
@@ -708,6 +783,7 @@ async function handleRpc(request, source = "remote") {
         visualEpoch,
         lastInvalidationReason,
         lastInvalidatedAt,
+        pointer: pointerMetadata(),
         paused,
         connected: anyTransportConnected(),
         localConnected,
@@ -977,6 +1053,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === "Runtime.bindingCalled" && params?.name === VISUAL_INVALIDATION_BINDING) {
     const event = parseVisualInvalidationPayload(params?.payload);
     if (consumeAgentInputEcho(event)) return;
+    if (Number.isFinite(event.x) && Number.isFinite(event.y) && Number.isFinite(event.viewportWidth) && Number.isFinite(event.viewportHeight)) {
+      setPointerFromViewport(event.x, event.y, event.viewportWidth, event.viewportHeight, "user", event.at);
+    }
+    if (event.kind === "pointer" || event.reason === "user-pointermove") return;
     invalidateVisualState(event.reason);
     return;
   }
@@ -1003,6 +1083,7 @@ chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
     attachedMainFrameId = null;
+    clearPointer();
     invalidateVisualState("debugger-detached");
     void chrome.alarms.clear(CONTROL_SESSION_ALARM);
     void setStatus(paused ? "paused" : anyTransportConnected() ? "connected" : "disconnected");
@@ -1026,7 +1107,10 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 chrome.windows.onBoundsChanged.addListener((window) => {
   if (attachedTabId == null || !Number.isInteger(window?.id)) return;
   void chrome.tabs.get(attachedTabId).then((tab) => {
-    if (tab?.windowId === window.id) invalidateVisualState("window-resized");
+    if (tab?.windowId === window.id) {
+      clearPointer();
+      invalidateVisualState("window-resized");
+    }
   }).catch(() => undefined);
 });
 
@@ -1047,6 +1131,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         visualEpoch,
         lastInvalidationReason,
         lastInvalidatedAt,
+        pointer: pointerMetadata(),
         paused,
         manualDisconnect,
         localConnected,
