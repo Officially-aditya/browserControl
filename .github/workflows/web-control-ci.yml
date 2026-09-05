@@ -62,7 +62,9 @@ jobs:
       - name: Extension unit tests
         run: npx vitest run tests/extension
       - name: Real Chrome extension → local MCP bridge canary
-        run: xvfb-run -a npx vitest run tests/integration/extension_local.integration.test.ts tests/integration/pointer_state.integration.test.ts
+        run: xvfb-run -a npx vitest run tests/integration/extension_local.integration.test.ts
+      - name: Real Chrome logical pointer canary
+        run: xvfb-run -a npx vitest run tests/integration/pointer_state.integration.test.ts
       - name: Generate throwaway localhost TLS certificate
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes \
