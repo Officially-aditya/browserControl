@@ -64,7 +64,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome logical pointer state", () => {
     try { await fixture?.close(); } catch {}
   });
 
-  it("tracks agent hover position in action, status, and observation metadata", async () => {
+  it("tracks agent hover position and renders a visible operator cursor", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -84,6 +84,28 @@ describe.skipIf(!canaryConfigured)("Real Chrome logical pointer state", () => {
     expect(movePayload.pointer.x).toBeCloseTo(300, 0);
     expect(movePayload.pointer.y).toBeCloseTo(400, 0);
 
+    const visibleCursor = await controller.session.send("Runtime.evaluate", {
+      expression: `(() => {
+        const pointer = document.querySelector("[data-browsercontrol-pointer]");
+        if (!pointer) return null;
+        return {
+          visibility: getComputedStyle(pointer).visibility,
+          x: Number(pointer.getAttribute("data-x")),
+          y: Number(pointer.getAttribute("data-y")),
+          width: innerWidth,
+          height: innerHeight,
+          pointerEvents: getComputedStyle(pointer).pointerEvents,
+        };
+      })()`,
+      returnByValue: true,
+    });
+    const cursor = visibleCursor.result.value as any;
+    expect(cursor).toBeTruthy();
+    expect(cursor.visibility).toBe("visible");
+    expect(cursor.pointerEvents).toBe("none");
+    expect((cursor.x / cursor.width) * 1000).toBeCloseTo(300, 0);
+    expect((cursor.y / cursor.height) * 1000).toBeCloseTo(400, 0);
+
     const status = await client.callTool({ name: "browser_status", arguments: {} });
     expect(status.isError).toBeFalsy();
     const statusPayload = JSON.parse((status.content[0] as any).text);
@@ -100,6 +122,15 @@ describe.skipIf(!canaryConfigured)("Real Chrome logical pointer state", () => {
     expect(afterMetadata.pointer.source).toBe("agent");
     expect(afterMetadata.pointer.x).toBeCloseTo(300, 0);
     expect(afterMetadata.pointer.y).toBeCloseTo(400, 0);
+
+    const restoredCursor = await controller.session.send("Runtime.evaluate", {
+      expression: `(() => {
+        const pointer = document.querySelector("[data-browsercontrol-pointer]");
+        return pointer ? getComputedStyle(pointer).visibility : null;
+      })()`,
+      returnByValue: true,
+    });
+    expect(restoredCursor.result.value).toBe("visible");
   });
 
   it("tracks real user pointer movement without staling the observation, while pointerdown still does", async () => {
