@@ -52,7 +52,7 @@ const VISUAL_HOOK_SCRIPT = `(() => {
     }, 50);
   };
   for (const eventName of ["pointerdown", "keydown", "input", "change", "scroll", "resize"]) {
-    addEventListener(eventName, () => notify(`user-${eventName}`), true);
+    addEventListener(eventName, () => notify("user-" + eventName), true);
   }
 })();`;
 
