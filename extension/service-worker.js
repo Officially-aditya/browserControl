@@ -46,6 +46,110 @@ const VISUAL_HOOK_SCRIPT = `(() => {
   if (globalThis.__browserControlVisualWatchInstalled) return;
   globalThis.__browserControlVisualWatchInstalled = true;
   let lastPointerSentAt = 0;
+  let pointerHost = null;
+  let pointerRing = null;
+  let pointerHideTimer = null;
+  let pointerShown = false;
+  let overlaySuppressed = false;
+
+  const applyPointerVisibility = () => {
+    if (!pointerHost?.isConnected) return;
+    pointerHost.style.setProperty("visibility", pointerShown && !overlaySuppressed ? "visible" : "hidden", "important");
+  };
+
+  const ensurePointerOverlay = () => {
+    if (pointerHost?.isConnected) return pointerHost;
+    const host = document.createElement("div");
+    host.setAttribute("data-browsercontrol-pointer", "");
+    host.setAttribute("aria-hidden", "true");
+    host.style.cssText = [
+      "all:initial !important",
+      "position:fixed !important",
+      "left:0 !important",
+      "top:0 !important",
+      "width:24px !important",
+      "height:32px !important",
+      "pointer-events:none !important",
+      "user-select:none !important",
+      "z-index:2147483647 !important",
+      "visibility:hidden !important",
+      "transform:translate3d(-100px,-100px,0) !important",
+      "contain:layout style paint !important",
+    ].join(";");
+
+    const shadow = host.attachShadow({ mode: "closed" });
+    const ring = document.createElement("span");
+    ring.style.cssText = [
+      "position:absolute",
+      "left:-10px",
+      "top:-10px",
+      "width:24px",
+      "height:24px",
+      "border:2px solid rgba(66,133,244,.92)",
+      "border-radius:999px",
+      "box-sizing:border-box",
+      "opacity:0",
+      "pointer-events:none",
+    ].join(";");
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 32");
+    svg.setAttribute("width", "24");
+    svg.setAttribute("height", "32");
+    svg.style.cssText = "display:block;width:24px;height:32px;overflow:visible;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35));";
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M2 1.5V24.5L8.2 18.5L12.7 29L17 27.1L12.6 16.9H21.3L2 1.5Z");
+    path.setAttribute("fill", "#111111");
+    path.setAttribute("stroke", "#ffffff");
+    path.setAttribute("stroke-width", "1.8");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+    shadow.appendChild(ring);
+    shadow.appendChild(svg);
+
+    const mount = () => {
+      const parent = document.documentElement || document.body;
+      if (!parent || host.isConnected) return;
+      parent.appendChild(host);
+    };
+    mount();
+    if (!host.isConnected) addEventListener("DOMContentLoaded", mount, { once: true });
+    pointerHost = host;
+    pointerRing = ring;
+    applyPointerVisibility();
+    return host;
+  };
+
+  const showPointer = (x, y, pulse = false) => {
+    const px = Number(x);
+    const py = Number(y);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+    const host = ensurePointerOverlay();
+    if (!host) return;
+    pointerShown = true;
+    host.style.setProperty("transform", "translate3d(" + (px - 2) + "px," + (py - 1.5) + "px,0)", "important");
+    host.setAttribute("data-x", String(px));
+    host.setAttribute("data-y", String(py));
+    applyPointerVisibility();
+    clearTimeout(pointerHideTimer);
+    pointerHideTimer = setTimeout(() => {
+      pointerShown = false;
+      applyPointerVisibility();
+    }, 30000);
+    if (pulse && pointerRing?.animate) {
+      for (const animation of pointerRing.getAnimations()) animation.cancel();
+      pointerRing.animate([
+        { opacity: 0.9, transform: "scale(.35)" },
+        { opacity: 0, transform: "scale(1.45)" },
+      ], { duration: 320, easing: "ease-out" });
+    }
+  };
+
+  globalThis.__browserControlSetPointerOverlayVisibility = (visible) => {
+    overlaySuppressed = visible === false;
+    applyPointerVisibility();
+  };
+
   const notify = (payload) => {
     try {
       globalThis.${VISUAL_INVALIDATION_BINDING}(JSON.stringify({
@@ -64,6 +168,7 @@ const VISUAL_HOOK_SCRIPT = `(() => {
   });
   addEventListener("pointermove", (event) => {
     if (event?.isTrusted === false) return;
+    showPointer(event?.clientX, event?.clientY, false);
     const now = Date.now();
     if (now - lastPointerSentAt < ${POINTER_EVENT_THROTTLE_MS}) return;
     lastPointerSentAt = now;
@@ -72,8 +177,14 @@ const VISUAL_HOOK_SCRIPT = `(() => {
   for (const eventName of ["pointerdown", "keydown", "beforeinput", "input", "change", "wheel", "touchstart"]) {
     addEventListener(eventName, (event) => {
       if (event?.isTrusted === false) return;
-      if (eventName === "pointerdown" || eventName === "wheel") {
-        notify(pointerPayload(event, "user-" + eventName));
+      if (eventName === "pointerdown") {
+        showPointer(event?.clientX, event?.clientY, true);
+        notify(pointerPayload(event, "user-pointerdown"));
+        return;
+      }
+      if (eventName === "wheel") {
+        showPointer(event?.clientX, event?.clientY, false);
+        notify(pointerPayload(event, "user-wheel"));
         return;
       }
       notify({ kind: "input", reason: "user-" + eventName });
@@ -194,6 +305,13 @@ function pointerMetadata() {
     return { known: false, coordinateSpace: "viewport_normalized_1000" };
   }
   return { ...pointerState };
+}
+
+async function setPointerOverlayVisibility(visible, tabId = attachedTabId) {
+  if (!Number.isInteger(tabId)) return;
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+    expression: `globalThis.__browserControlSetPointerOverlayVisibility?.(${visible ? "true" : "false"})`,
+  }).catch(() => undefined);
 }
 
 function inputEchoReasons(method, params = {}) {
@@ -379,6 +497,7 @@ async function detach(updateStatus = true) {
   clearPointer();
   invalidateVisualState("tab-detached");
   if (tabId != null) {
+    await setPointerOverlayVisibility(false, tabId);
     try { await chrome.debugger.detach({ tabId }); } catch {}
   }
   if (updateStatus) {
@@ -422,6 +541,15 @@ async function viewport() {
 
 function mimeType(format) {
   return format === "png" ? "image/png" : format === "webp" ? "image/webp" : "image/jpeg";
+}
+
+async function captureScreenshot(params) {
+  await setPointerOverlayVisibility(false);
+  try {
+    return await send("Page.captureScreenshot", params);
+  } finally {
+    await setPointerOverlayVisibility(true);
+  }
 }
 
 function rememberObservation(record) {
@@ -482,7 +610,7 @@ async function observe(params = {}) {
   const maxLongEdge = Math.min(2000, Math.max(480, Number(params.maxLongEdge) || 1280));
   const longEdge = Math.max(vp.width, vp.height);
   const scale = longEdge > 0 ? Math.min(1, maxLongEdge / longEdge) : 1;
-  const shot = await send("Page.captureScreenshot", {
+  const shot = await captureScreenshot({
     format,
     ...(format === "png" ? {} : { quality }),
     fromSurface: true,
@@ -524,7 +652,7 @@ async function inspectRegion(params = {}) {
   const region = normalizedRegionToSource(params, source.sourceRegion);
   const format = params.format || "png";
   const quality = params.quality ?? 90;
-  const shot = await send("Page.captureScreenshot", {
+  const shot = await captureScreenshot({
     format,
     ...(format === "png" ? {} : { quality }),
     fromSurface: true,
