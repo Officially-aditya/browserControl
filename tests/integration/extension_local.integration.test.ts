@@ -149,7 +149,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     expect(clicked.isError).toBeFalsy();
   });
 
-  it("ignores child-frame navigation churn when the main page is unchanged", async () => {
+  it("ignores background child-frame navigation churn when visible geometry is unchanged", async () => {
     const observation = await client.callTool({
       name: "browser_observe",
       arguments: { format: "jpeg", maxLongEdge: 640 },
@@ -161,6 +161,7 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
       expression: `(() => {
         const frame = document.createElement("iframe");
         frame.id = "background-media-frame";
+        frame.style.display = "none";
         frame.src = ${JSON.stringify("about:blank")};
         document.body.appendChild(frame);
         setTimeout(() => { frame.src = ${JSON.stringify("data:text/html,<p>media churn</p>")}; }, 25);
@@ -168,6 +169,10 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
       returnByValue: true,
     });
     await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const status = await client.callTool({ name: "browser_status", arguments: {} });
+    expect(status.isError).toBeFalsy();
+    const statusPayload = JSON.parse((status.content[0] as any).text);
 
     const clicked = await client.callTool({
       name: "browser_click",
@@ -178,6 +183,9 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
         button: "left",
       },
     });
+    if (clicked.isError) {
+      throw new Error(`background frame churn unexpectedly invalidated observation: ${(clicked.content[0] as any)?.text}; last reason=${statusPayload.extension?.lastInvalidationReason}`);
+    }
     expect(clicked.isError).toBeFalsy();
   });
 
