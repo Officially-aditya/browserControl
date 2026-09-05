@@ -17,6 +17,7 @@ const CONTROL_SESSION_IDLE_MINUTES = 15;
 const ENROLLMENT_HEADER = "X-BrowserControl-Enrollment";
 const ENROLLMENT_HEADER_VALUE = "extension-v1";
 const TRANSPORT_LEASE_MS = 60_000;
+const AGENT_INPUT_ECHO_WINDOW_MS = 200;
 const MUTATING_RPC_METHODS = new Set([
   "move",
   "click",
@@ -68,6 +69,7 @@ let lastTargetTabId = null;
 let visualEpoch = 0;
 let lastInvalidationReason = "startup";
 let lastInvalidatedAt = 0;
+let lastSuppressedAgentEchoEpoch = -1;
 let paused = false;
 let manualDisconnect = false;
 let reconnectTimer = null;
@@ -133,6 +135,23 @@ function invalidateVisualState(reason = "browser-control-action") {
   lastInvalidationReason = String(reason || "browser-control-action");
   lastInvalidatedAt = Date.now();
   observations.clear();
+}
+
+function isDelayedAgentInputEcho(payload) {
+  if (lastSuppressedAgentEchoEpoch === visualEpoch) return false;
+  const age = Date.now() - lastInvalidatedAt;
+  if (age < 0 || age > AGENT_INPUT_ECHO_WINDOW_MS) return false;
+  const expected = {
+    "agent-click": new Set(["user-pointerdown"]),
+    "agent-double-click": new Set(["user-pointerdown"]),
+    "agent-drag": new Set(["user-pointerdown"]),
+    "agent-scroll": new Set(["user-wheel"]),
+    "agent-type": new Set(["user-beforeinput", "user-input", "user-change"]),
+    "agent-keypress": new Set(["user-keydown"]),
+  }[lastInvalidationReason];
+  if (!expected?.has(String(payload || ""))) return false;
+  lastSuppressedAgentEchoEpoch = visualEpoch;
+  return true;
 }
 
 function isControllableWebTab(tab) {
@@ -911,6 +930,7 @@ async function noteActiveTarget(tabId) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== attachedTabId) return;
   if (method === "Runtime.bindingCalled" && params?.name === VISUAL_INVALIDATION_BINDING) {
+    if (isDelayedAgentInputEcho(params?.payload)) return;
     invalidateVisualState(params?.payload || "user-control-input");
     return;
   }
