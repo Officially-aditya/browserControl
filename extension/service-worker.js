@@ -48,11 +48,14 @@ const VISUAL_HOOK_SCRIPT = `(() => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
-      try { globalThis.${VISUAL_INVALIDATION_BINDING}(String(reason || "user-visual-change")); } catch {}
+      try { globalThis.${VISUAL_INVALIDATION_BINDING}(String(reason || "user-control-input")); } catch {}
     }, 50);
   };
-  for (const eventName of ["pointerdown", "keydown", "input", "change", "scroll", "resize"]) {
-    addEventListener(eventName, () => notify("user-" + eventName), true);
+  for (const eventName of ["pointerdown", "keydown", "beforeinput", "input", "change", "wheel", "touchstart"]) {
+    addEventListener(eventName, (event) => {
+      if (event?.isTrusted === false) return;
+      notify("user-" + eventName);
+    }, true);
   }
 })();`;
 
@@ -60,8 +63,11 @@ let socket = null;
 let localConnection = null;
 let localConnected = false;
 let attachedTabId = null;
+let attachedMainFrameId = null;
 let lastTargetTabId = null;
 let visualEpoch = 0;
+let lastInvalidationReason = "startup";
+let lastInvalidatedAt = 0;
 let paused = false;
 let manualDisconnect = false;
 let reconnectTimer = null;
@@ -103,6 +109,8 @@ async function setStatus(status, extra = {}) {
     status: effectiveStatus,
     attachedTabId,
     visualEpoch,
+    lastInvalidationReason,
+    lastInvalidatedAt,
     paused,
     manualDisconnect,
     localConnected,
@@ -120,8 +128,10 @@ async function setStatus(status, extra = {}) {
   chrome.action.setBadgeBackgroundColor({ color });
 }
 
-function invalidateVisualState() {
+function invalidateVisualState(reason = "browser-control-action") {
   visualEpoch++;
+  lastInvalidationReason = String(reason || "browser-control-action");
+  lastInvalidatedAt = Date.now();
   observations.clear();
 }
 
@@ -217,15 +227,19 @@ async function attach(tabId) {
   if (attachedTabId != null) await detach(false);
   await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
   attachedTabId = tabId;
-  invalidateVisualState();
+  attachedMainFrameId = null;
+  invalidateVisualState("tab-attached");
   try {
     await chrome.debugger.sendCommand({ tabId }, "Page.enable");
     await chrome.debugger.sendCommand({ tabId }, "Runtime.enable");
+    const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree");
+    attachedMainFrameId = frameTree?.frameTree?.frame?.id || null;
     await installVisualInvalidationHooks(tabId);
   } catch (error) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
     attachedTabId = null;
-    invalidateVisualState();
+    attachedMainFrameId = null;
+    invalidateVisualState("attach-failed");
     throw error;
   }
   await touchControlSession();
@@ -235,7 +249,8 @@ async function attach(tabId) {
 async function detach(updateStatus = true) {
   const tabId = attachedTabId;
   attachedTabId = null;
-  invalidateVisualState();
+  attachedMainFrameId = null;
+  invalidateVisualState("tab-detached");
   if (tabId != null) {
     try { await chrome.debugger.detach({ tabId }); } catch {}
   }
@@ -287,13 +302,13 @@ function rememberObservation(record) {
 
 function assertFresh(observationId) {
   if (!observationId) {
-    const err = new Error("observationId is required for mutating browser actions");
+    const err = new Error("observationId is required for visual or focus-dependent browser actions");
     err.code = "OBSERVATION_REQUIRED";
     throw err;
   }
   const record = observations.get(String(observationId));
   if (!record || record.tabId !== attachedTabId || record.visualEpoch !== visualEpoch) {
-    const err = new Error("STALE_OBSERVATION");
+    const err = new Error(`STALE_OBSERVATION: control context changed after the screenshot (${lastInvalidationReason})`);
     err.code = "STALE_OBSERVATION";
     throw err;
   }
@@ -411,7 +426,7 @@ async function mouseMove(params) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y, button: "none" });
-  invalidateVisualState();
+  invalidateVisualState("agent-move");
   return { success: true, visualEpoch };
 }
 
@@ -421,7 +436,7 @@ async function mouseClick(params, clickCount = 1) {
   const button = params.button || "left";
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount });
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, clickCount });
-  invalidateVisualState();
+  invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
   return { success: true, visualEpoch };
 }
 
@@ -438,7 +453,7 @@ async function drag(params) {
   }
   const last = points[points.length - 1];
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: last.x, y: last.y, button: "left", clickCount: 1 });
-  invalidateVisualState();
+  invalidateVisualState("agent-drag");
   return { success: true, visualEpoch };
 }
 
@@ -450,7 +465,7 @@ async function scroll(params) {
   if (Math.abs(deltaX) > 4000 || Math.abs(deltaY) > 4000) throw new Error("scroll deltas must be within ±4000");
   const p = normalizedPointToSource(params.x ?? 500, params.y ?? 500, record);
   await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX, deltaY });
-  invalidateVisualState();
+  invalidateVisualState("agent-scroll");
   return { success: true, visualEpoch };
 }
 
@@ -459,7 +474,7 @@ async function typeText(params) {
   const text = String(params.text ?? "");
   if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
   await send("Input.insertText", { text });
-  invalidateVisualState();
+  invalidateVisualState("agent-type");
   return { success: true, visualEpoch };
 }
 
@@ -468,7 +483,7 @@ async function keypress(params) {
   const events = keyEvents(params.keys);
   await send("Input.dispatchKeyEvent", events.down);
   await send("Input.dispatchKeyEvent", events.up);
-  invalidateVisualState();
+  invalidateVisualState("agent-keypress");
   return { success: true, visualEpoch };
 }
 
@@ -506,7 +521,7 @@ async function waitForEligibleTarget(tabId) {
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  const error = new Error("The New Tab page did not become a controllable web page after navigation");
+  const error = new Error("The tab did not become a controllable web page after navigation");
   error.code = "NAVIGATION_FAILED";
   throw error;
 }
@@ -514,41 +529,33 @@ async function waitForEligibleTarget(tabId) {
 async function navigate(params) {
   if (!params.url) throw new Error("url is required");
   const safeUrl = assertSafeNavigationUrl(params.url);
+  const active = await activeTab();
 
-  if (params.observationId) {
-    assertFresh(params.observationId);
-    await send("Page.navigate", { url: safeUrl });
-    invalidateVisualState();
-    return { success: true, visualEpoch, url: safeUrl, bootstrap: false };
+  if (attachedTabId == null && isBootstrapTab(active)) {
+    await chrome.tabs.update(active.id, { url: safeUrl, active: true });
+    const target = await waitForEligibleTarget(active.id);
+    await attach(target.id);
+    return { success: true, visualEpoch, url: safeUrl, bootstrap: true, targetId: String(target.id) };
   }
 
-  const tab = await activeTab();
-  if (!isBootstrapTab(tab)) {
-    const error = new Error("observationId is required unless the active tab is Chrome New Tab/about:blank");
-    error.code = "OBSERVATION_REQUIRED";
-    throw error;
-  }
-  if (attachedTabId != null && attachedTabId !== tab.id) await detach(false);
-  await chrome.tabs.update(tab.id, { url: safeUrl, active: true });
-  const target = await waitForEligibleTarget(tab.id);
-  await attach(target.id);
-  return { success: true, visualEpoch, url: safeUrl, bootstrap: true, targetId: String(target.id) };
+  const tabId = await ensureAttached();
+  await chrome.debugger.sendCommand({ tabId }, "Page.navigate", { url: safeUrl });
+  invalidateVisualState("agent-navigate");
+  return { success: true, visualEpoch, url: safeUrl, bootstrap: false, targetId: String(tabId) };
 }
 
-async function historyAction(params, direction) {
-  assertFresh(params.observationId);
+async function historyAction(_params, direction) {
   const tabId = await ensureAttached();
   if (direction === "back") await chrome.tabs.goBack(tabId);
   else await chrome.tabs.goForward(tabId);
-  invalidateVisualState();
+  invalidateVisualState(direction === "back" ? "agent-back" : "agent-forward");
   return { success: true, visualEpoch };
 }
 
-async function reload(params) {
-  assertFresh(params.observationId);
+async function reload(_params = {}) {
   const tabId = await ensureAttached();
   await chrome.tabs.reload(tabId);
-  invalidateVisualState();
+  invalidateVisualState("agent-reload");
   return { success: true, visualEpoch };
 }
 
@@ -558,7 +565,6 @@ async function listTabs() {
 }
 
 async function switchTab(params) {
-  assertFresh(params.observationId);
   const tabId = Number(params.targetId);
   if (!Number.isInteger(tabId)) throw new Error("targetId must be a Chrome tab id");
   const tab = await chrome.tabs.get(tabId);
@@ -570,11 +576,13 @@ async function switchTab(params) {
 }
 
 async function newTab(params = {}) {
-  assertFresh(params.observationId);
   const safeUrl = assertSafeNewTabUrl(params.url);
   const tab = await chrome.tabs.create({ url: safeUrl, active: true });
   if (!tab.id) throw new Error("Failed to create tab");
-  if (safeUrl !== "about:blank") await attach(tab.id);
+  if (safeUrl !== "about:blank") {
+    const target = await waitForEligibleTarget(tab.id);
+    await attach(target.id);
+  }
   return { success: true, targetId: String(tab.id), visualEpoch };
 }
 
@@ -585,7 +593,8 @@ async function closeTab(params = {}) {
   await chrome.tabs.remove(tabId);
   if (tabId === attachedTabId) {
     attachedTabId = null;
-    invalidateVisualState();
+    attachedMainFrameId = null;
+    invalidateVisualState("agent-close-tab");
   }
   return { success: true, visualEpoch };
 }
@@ -593,7 +602,7 @@ async function closeTab(params = {}) {
 async function handleDialog(params = {}) {
   assertFresh(params.observationId);
   await send("Page.handleJavaScriptDialog", { accept: !!params.accept, ...(params.promptText != null ? { promptText: String(params.promptText) } : {}) });
-  invalidateVisualState();
+  invalidateVisualState("agent-handle-dialog");
   return { success: true, visualEpoch };
 }
 
@@ -633,6 +642,8 @@ async function handleRpc(request, source = "remote") {
       return {
         attachedTabId,
         visualEpoch,
+        lastInvalidationReason,
+        lastInvalidatedAt,
         paused,
         connected: anyTransportConnected(),
         localConnected,
@@ -900,24 +911,37 @@ async function noteActiveTarget(tabId) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== attachedTabId) return;
   if (method === "Runtime.bindingCalled" && params?.name === VISUAL_INVALIDATION_BINDING) {
-    invalidateVisualState();
+    invalidateVisualState(params?.payload || "user-control-input");
     return;
   }
-  if ([
-    "Page.frameNavigated",
-    "Page.navigatedWithinDocument",
-    "Page.loadEventFired",
-    "Page.javascriptDialogOpening",
-    "Runtime.executionContextsCleared",
-  ].includes(method)) {
-    invalidateVisualState();
+  if (method === "Page.frameNavigated") {
+    const frame = params?.frame;
+    if (frame?.id && !frame?.parentId) {
+      attachedMainFrameId = frame.id;
+      invalidateVisualState("main-frame-navigated");
+    }
+    return;
+  }
+  if (method === "Page.navigatedWithinDocument") {
+    if (!attachedMainFrameId || params?.frameId === attachedMainFrameId) {
+      invalidateVisualState("main-frame-same-document-navigation");
+    }
+    return;
+  }
+  if (method === "Page.javascriptDialogOpening") {
+    invalidateVisualState("javascript-dialog-opened");
+    return;
+  }
+  if (method === "Page.frameResized") {
+    invalidateVisualState("viewport-resized");
   }
 });
 
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId === attachedTabId) {
     attachedTabId = null;
-    invalidateVisualState();
+    attachedMainFrameId = null;
+    invalidateVisualState("debugger-detached");
     void chrome.alarms.clear(CONTROL_SESSION_ALARM);
     void setStatus(paused ? "paused" : anyTransportConnected() ? "connected" : "disconnected");
   }
@@ -952,6 +976,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         gatewayUrl: resolveGatewayUrl(stored),
         attachedTabId,
         visualEpoch,
+        lastInvalidationReason,
+        lastInvalidatedAt,
         paused,
         manualDisconnect,
         localConnected,
@@ -997,7 +1023,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.type === "togglePause") {
       paused = !paused;
-      invalidateVisualState();
+      invalidateVisualState("pause-toggled");
       if (paused) {
         await chrome.alarms.clear(CONTROL_SESSION_ALARM);
         await detach(false);
