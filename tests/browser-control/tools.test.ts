@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ControlLease, type BrowserRoute } from "../../src/browser-control/bridge.js";
-import { browserTools, handleBrowserToolCall } from "../../src/browser-control/tools.js";
+import { browserTools, handleBrowserToolCall, isPasteShortcut } from "../../src/browser-control/tools.js";
 
 function fakeRoute(callImpl?: (method: string, params: Record<string, any>) => any): BrowserRoute {
   return {
@@ -121,5 +121,35 @@ describe("canonical browserControl tools", () => {
 
     expect(blocked.isError).toBe(true);
     expect(JSON.parse(blocked.content[0].text).errorCode).toBe("DEVICE_BUSY");
+  });
+
+  it("detects paste shortcuts and disallows them to force keyboard typing", async () => {
+    expect(isPasteShortcut(["Control", "v"])).toBe(true);
+    expect(isPasteShortcut(["ctrl", "v"])).toBe(true);
+    expect(isPasteShortcut(["Meta", "v"])).toBe(true);
+    expect(isPasteShortcut(["cmd", "v"])).toBe(true);
+    expect(isPasteShortcut(["paste"])).toBe(true);
+    expect(isPasteShortcut(["Control", "c"])).toBe(false);
+    expect(isPasteShortcut(["Enter"])).toBe(false);
+
+    const route = fakeRoute();
+    const pasteAttempt = await handleBrowserToolCall(route, "client-a", "browser_keypress", {
+      observationId: "obs-1",
+      keys: ["Control", "v"],
+    });
+
+    expect(pasteAttempt.isError).toBe(true);
+    expect((route.bridge.call as any).mock.calls).toHaveLength(0);
+    const parsed = JSON.parse(pasteAttempt.content[0].text);
+    expect(parsed.errorCode).toBe("PASTE_DISABLED");
+    expect(parsed.message).toContain("Pasting via keyboard shortcut is disabled");
+
+    const validShortcut = await handleBrowserToolCall(route, "client-a", "browser_keypress", {
+      observationId: "obs-1",
+      keys: ["Control", "a"],
+    });
+    expect(validShortcut.isError).toBeUndefined();
+    expect((route.bridge.call as any).mock.calls).toHaveLength(1);
+    expect((route.bridge.call as any).mock.calls[0]).toEqual(["keypress", { observationId: "obs-1", keys: ["Control", "a"] }]);
   });
 });
