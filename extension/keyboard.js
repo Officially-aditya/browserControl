@@ -66,8 +66,30 @@ const PUNCTUATION = {
   "`": ["Backquote", 192], "~": ["Backquote", 192],
 };
 
+export function isPasteShortcut(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) return false;
+  let hasCommand = false;
+  let hasV = false;
+  for (const raw of keys) {
+    const key = String(raw).toLowerCase();
+    if (key === "paste") return true;
+    const canonical = MODIFIER_ALIASES.get(key);
+    if (canonical && (canonical === "Meta" || canonical === "Control")) {
+      hasCommand = true;
+    } else if (key === "v") {
+      hasV = true;
+    }
+  }
+  return hasCommand && hasV;
+}
+
 export function normalizeShortcut(keys) {
   if (!Array.isArray(keys) || keys.length === 0) throw new Error("keys is required");
+  if (isPasteShortcut(keys)) {
+    const error = new Error("Pasting via keyboard shortcut is disabled. Agents must use keyboard typing (browser_type) instead of copy-pasting.");
+    error.code = "PASTE_DISABLED";
+    throw error;
+  }
   let modifiers = 0;
   const nonModifiers = [];
   for (const raw of keys) {
@@ -111,7 +133,6 @@ export function editingCommands(key, modifiers) {
   const lower = String(key).toLowerCase();
   if (lower === "a") return ["SelectAll"];
   if (lower === "c") return ["Copy"];
-  if (lower === "v") return ["Paste"];
   if (lower === "x") return ["Cut"];
   if (lower === "z") return modifiers & MODIFIERS.Shift ? ["Redo"] : ["Undo"];
   if (lower === "y") return ["Redo"];

@@ -127,8 +127,8 @@ export function browserTools(): Tool[] {
         additionalProperties: false,
       },
     },
-    { name: "browser_type", description: "Insert text into the focused element only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
-    { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
+    { name: "browser_type", description: "Type text character-by-character into the focused element using simulated keyboard keystrokes only if the referenced observation is still current. Use this tool to enter text using the keyboard instead of attempting to copy-paste.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
+    { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current. Note: Paste shortcuts (e.g. Ctrl+V, Cmd+V, Paste) are disabled to force using keyboard typing; use browser_type to enter text.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
     { name: "browser_navigate", description: "Navigate the shared tab to an http(s) URL. This deterministic recovery action does not require a fresh observation, including on dynamic pages and Chrome New Tab/about:blank.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["url"], additionalProperties: false } },
     { name: "browser_back", description: "Navigate the shared tab backward. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
     { name: "browser_forward", description: "Navigate the shared tab forward. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
@@ -140,6 +140,22 @@ export function browserTools(): Tool[] {
     { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, accept: { type: "boolean" }, promptText: { type: "string", maxLength: 5000 } }, required: ["observationId", "accept"], additionalProperties: false } },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the browserControl device.", inputSchema: EMPTY_SCHEMA },
   ];
+}
+
+export function isPasteShortcut(keys: unknown[]): boolean {
+  if (!Array.isArray(keys)) return false;
+  let hasModifier = false;
+  let hasV = false;
+  for (const raw of keys) {
+    const key = String(raw).toLowerCase();
+    if (key === "paste") return true;
+    if (["ctrl", "control", "cmd", "command", "meta", "super"].includes(key)) {
+      hasModifier = true;
+    } else if (key === "v") {
+      hasV = true;
+    }
+  }
+  return hasModifier && hasV;
 }
 
 function assertAllowedCall(method: string, args: Record<string, any>): Record<string, any> {
@@ -160,6 +176,12 @@ function assertAllowedCall(method: string, args: Record<string, any>): Record<st
         if (typeof key !== "string" || key.length > 50) {
           throw Object.assign(new Error("each key must be at most 50 characters"), { code: "INPUT_TOO_LARGE" });
         }
+      }
+      if (isPasteShortcut(next.keys)) {
+        throw Object.assign(
+          new Error("Pasting via keyboard shortcut is disabled. Agents must use the keyboard (browser_type) to type text instead."),
+          { code: "PASTE_DISABLED" }
+        );
       }
     }
   } else if (method === "drag") {

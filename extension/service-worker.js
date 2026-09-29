@@ -8,7 +8,7 @@ import {
   resolveGatewayUrl,
 } from "./gateway-connection.js";
 import { createLocalConnection } from "./local-connection.js";
-import { keyEvents } from "./keyboard.js";
+import { keyDefinition, keyEvents } from "./keyboard.js";
 
 const DEBUGGER_VERSION = "1.3";
 const VISUAL_INVALIDATION_BINDING = "__browserControlVisualInvalidated";
@@ -739,7 +739,44 @@ async function typeText(params) {
   assertFresh(params.observationId);
   const text = String(params.text ?? "");
   if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
-  await send("Input.insertText", { text });
+
+  const chars = Array.from(text);
+  for (const char of chars) {
+    if (char === "\n" || char === "\r") {
+      const events = keyEvents(["Enter"]);
+      await send("Input.dispatchKeyEvent", events.down);
+      await send("Input.dispatchKeyEvent", events.up);
+    } else if (char === "\t") {
+      const events = keyEvents(["Tab"]);
+      await send("Input.dispatchKeyEvent", events.down);
+      await send("Input.dispatchKeyEvent", events.up);
+    } else {
+      const def = keyDefinition(char);
+      const isUpperCase = char >= "A" && char <= "Z";
+      const modifiers = isUpperCase ? 8 : 0; // MODIFIERS.Shift = 8
+      await send("Input.dispatchKeyEvent", {
+        type: "rawKeyDown",
+        modifiers,
+        key: def.key,
+        code: def.code,
+        windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+        text: char,
+        unmodifiedText: char,
+      });
+      await send("Input.insertText", { text: char });
+      await send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        modifiers,
+        key: def.key,
+        code: def.code,
+        windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+      });
+    }
+    if (chars.length > 1) {
+      await new Promise((resolve) => setTimeout(resolve, 6));
+    }
+  }
+
   invalidateVisualState("agent-type");
   return { success: true, visualEpoch };
 }
