@@ -38,6 +38,7 @@ describe("canonical browserControl tools", () => {
       "browser_new_tab",
       "browser_close_tab",
       "browser_handle_dialog",
+      "browser_evaluate",
       "browser_release_control",
     ]);
   });

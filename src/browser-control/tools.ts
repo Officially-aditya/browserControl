@@ -127,8 +127,8 @@ export function browserTools(): Tool[] {
         additionalProperties: false,
       },
     },
-    { name: "browser_type", description: "Type text character-by-character into the focused element using simulated keyboard keystrokes only if the referenced observation is still current. Use this tool to enter text using the keyboard instead of attempting to copy-paste.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
-    { name: "browser_keypress", description: "Send a keyboard shortcut only if the referenced observation is still current. Note: Paste shortcuts (e.g. Ctrl+V, Cmd+V, Paste) are disabled to force using keyboard typing; use browser_type to enter text.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
+    { name: "browser_type", description: "Type the given text into the focused element. Pass the full text you want typed (words, sentences, or paragraphs up to 5 000 chars) in a single call — the extension internally replays each character as real keyboard keystrokes so the page sees genuine key events. Do NOT call once per character; always send the complete text in one call. Requires a current observationId.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, text: { type: "string", maxLength: 5000 } }, required: ["observationId", "text"], additionalProperties: false } },
+    { name: "browser_keypress", description: "Send a keyboard shortcut (e.g. Enter, Tab, Ctrl+A, Escape) only if the referenced observation is still current. For typing text use browser_type instead. Paste shortcuts (Ctrl+V, Cmd+V) are blocked — use browser_type to enter text.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 } } }, required: ["observationId", "keys"], additionalProperties: false } },
     { name: "browser_navigate", description: "Navigate the shared tab to an http(s) URL. This deterministic recovery action does not require a fresh observation, including on dynamic pages and Chrome New Tab/about:blank.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, required: ["url"], additionalProperties: false } },
     { name: "browser_back", description: "Navigate the shared tab backward. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
     { name: "browser_forward", description: "Navigate the shared tab forward. A stale or omitted observation does not block this deterministic recovery action.", inputSchema: OPTIONAL_OBSERVATION_SCHEMA },
@@ -138,6 +138,18 @@ export function browserTools(): Tool[] {
     { name: "browser_new_tab", description: "Create a new tab. No observation is required. Only http://, https://, or about:blank are allowed.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, url: { type: "string", format: "uri", maxLength: 2048 } }, additionalProperties: false } },
     { name: "browser_close_tab", description: "Close a tab from a fresh observation. If targetId is omitted, close the currently shared tab.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, targetId: { type: "string", maxLength: 128 } }, required: ["observationId"], additionalProperties: false } },
     { name: "browser_handle_dialog", description: "Accept or dismiss the active JavaScript dialog from a fresh observation.", inputSchema: { type: "object" as const, properties: { observationId: { type: "string" }, accept: { type: "boolean" }, promptText: { type: "string", maxLength: 5000 } }, required: ["observationId", "accept"], additionalProperties: false } },
+    {
+      name: "browser_evaluate",
+      description: "Evaluate a JavaScript expression in the context of the active tab. Useful for reading DOM state, setting complex inputs or dropdown values, and automating form interactions.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          expression: { type: "string", maxLength: 20000 },
+        },
+        required: ["expression"],
+        additionalProperties: false,
+      },
+    },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the browserControl device.", inputSchema: EMPTY_SCHEMA },
   ];
 }
@@ -246,6 +258,7 @@ export async function handleBrowserToolCall(
       case "browser_new_tab": return textResult(await mutate("new_tab", args));
       case "browser_close_tab": return textResult(await mutate("close_tab", args));
       case "browser_handle_dialog": return textResult(await mutate("handle_dialog", args));
+      case "browser_evaluate": return textResult(await mutate("evaluate", args));
       case "browser_release_control":
         route.lease.release(clientId);
         return textResult({ success: true });
