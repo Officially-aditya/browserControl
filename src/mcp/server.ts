@@ -265,7 +265,21 @@ export async function runStdioServer(): Promise<void> {
   await server.connect(transport);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+function isDirectRun(metaUrl: string): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    const scriptPath = path.resolve(process.argv[1]).toLowerCase();
+    const metaPath = fileURLToPath(metaUrl).toLowerCase();
+    return scriptPath === metaPath || metaUrl === `file://${process.argv[1]}`;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun(import.meta.url)) {
   runStdioServer().catch((err) => {
     console.error("Fatal MCP error:", err);
     process.exit(1);
