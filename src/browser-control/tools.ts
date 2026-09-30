@@ -53,7 +53,7 @@ export function browserTools(): Tool[] {
     { name: "browser_status", description: "Check this browserControl device, active-tab/bootstrap state, logical browser pointer position/source, latest freshness invalidation reason, local pause state, and exclusive-control lease status. Pointer coordinates are viewport-normalized 0-1000 and describe browserControl's logical pointer, not the OS cursor.", inputSchema: EMPTY_SCHEMA },
     {
       name: "browser_observe",
-      description: "Capture the currently shared Chrome tab. Coordinates use normalized 0-1000 values. Metadata includes the current logical browser pointer position/source when known. Visual/focus-dependent actions such as click, type, drag, and scroll must reference the returned observationId.",
+      description: "Capture a screenshot of the currently shared Chrome tab. Coordinates use normalized 0-1000 values. This is slower than browser_snapshot but gives visual context for image-heavy or canvas-based pages. Prefer browser_snapshot for most tasks.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -61,6 +61,15 @@ export function browserTools(): Tool[] {
           quality: { type: "number", minimum: 1, maximum: 100, default: 82 },
           maxLongEdge: { type: "number", minimum: 480, maximum: 2000, default: 1280 },
         },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser_snapshot",
+      description: "Fast DOM snapshot of the current page. Returns a structured text representation of visible elements with interactive elements annotated with [index] markers and normalized (x,y) coordinates in 0-1000 space. Much faster than browser_observe (no screenshot encoding). Use this as the primary observation tool — fall back to browser_observe only when you need pixel-level visual context (e.g. canvas, images, charts). The returned observationId works with all action tools (click, type, scroll, etc.).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
         additionalProperties: false,
       },
     },
@@ -241,6 +250,7 @@ export async function handleBrowserToolCall(
         });
       }
       case "browser_observe": return imageResult(await route.bridge.call("observe", args));
+      case "browser_snapshot": return textResult(await route.bridge.call("snapshot", args));
       case "browser_inspect": return imageResult(await route.bridge.call("inspect_region", args));
       case "browser_move": return textResult(await mutate("move", args));
       case "browser_click": return textResult(await mutate("click", args));

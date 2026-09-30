@@ -21,6 +21,7 @@ describe("canonical browserControl tools", () => {
     expect(browserTools().map((tool) => tool.name)).toEqual([
       "browser_status",
       "browser_observe",
+      "browser_snapshot",
       "browser_inspect",
       "browser_move",
       "browser_click",

@@ -35,6 +35,7 @@ const MUTATING_RPC_METHODS = new Set([
   "new_tab",
   "close_tab",
   "handle_dialog",
+  "evaluate",
 ]);
 const CONTROL_SURFACE_HOSTS = new Set([
   "claude.ai",
@@ -684,6 +685,144 @@ async function inspectRegion(params = {}) {
   };
 }
 
+const DOM_SNAPSHOT_SCRIPT = `(() => {
+  const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
+  const INLINE = new Set(['SPAN','EM','STRONG','B','I','U','A','ABBR','CODE','SMALL','SUB','SUP','MARK','TIME','LABEL']);
+  const vw = window.innerWidth || 1;
+  const vh = window.innerHeight || 1;
+  function norm(v, max) { return Math.round(Math.max(0, Math.min(1000, (v / max) * 1000))); }
+  function vis(el) {
+    if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden';
+  }
+  function interactive(el) {
+    const tag = el.tagName;
+    if (['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag)) return true;
+    const role = el.getAttribute('role');
+    if (role && ['button','link','textbox','checkbox','radio','combobox','listbox','menuitem','tab','switch','slider','searchbox','option','menuitemcheckbox','menuitemradio','treeitem'].includes(role)) return true;
+    if (el.contentEditable === 'true') return true;
+    if (el.getAttribute('tabindex') !== null && Number(el.getAttribute('tabindex')) >= 0) return true;
+    if (el.onclick || el.getAttribute('onclick')) return true;
+    return false;
+  }
+  function attrs(el) {
+    const parts = [];
+    if (el.id) parts.push('id="' + el.id + '"');
+    if (el.name) parts.push('name="' + el.name + '"');
+    if (el.type && el.tagName === 'INPUT') parts.push('type="' + el.type + '"');
+    if (el.tagName === 'A' && el.href) parts.push('href="' + el.getAttribute('href') + '"');
+    if (el.placeholder) parts.push('placeholder="' + el.placeholder + '"');
+    if (el.getAttribute('aria-label')) parts.push('aria-label="' + el.getAttribute('aria-label') + '"');
+    if (el.getAttribute('role')) parts.push('role="' + el.getAttribute('role') + '"');
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      const v = el.value || '';
+      parts.push('value="' + v.slice(0, 200) + '"');
+    }
+    if (el.tagName === 'SELECT') {
+      const opt = el.options[el.selectedIndex];
+      if (opt) parts.push('selected="' + opt.text + '"');
+    }
+    if (el.checked !== undefined) parts.push(el.checked ? 'checked' : 'unchecked');
+    if (el.disabled) parts.push('disabled');
+    if (el.readOnly) parts.push('readonly');
+    return parts.join(' ');
+  }
+  function coords(el) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return '';
+    const cx = norm(r.left + r.width / 2, vw);
+    const cy = norm(r.top + r.height / 2, vh);
+    return ' @(' + cx + ',' + cy + ')';
+  }
+  const lines = [];
+  let idx = 0;
+  function text(el) {
+    let t = '';
+    for (const c of el.childNodes) {
+      if (c.nodeType === 3) t += c.textContent;
+    }
+    return t.replace(/\\s+/g, ' ').trim().slice(0, 500);
+  }
+  function walk(el, depth) {
+    if (!el || el.nodeType !== 1) return;
+    const tag = el.tagName;
+    if (SKIP.has(tag)) return;
+    if (tag === 'SVG' || el.namespaceURI === 'http://www.w3.org/2000/svg') {
+      lines.push('  '.repeat(depth) + '[svg]');
+      return;
+    }
+    if (!vis(el)) return;
+    const isI = interactive(el);
+    const pad = '  '.repeat(depth);
+    const a = attrs(el);
+    const t = text(el);
+    const tagLower = tag.toLowerCase();
+    if (isI) {
+      idx++;
+      const c = coords(el);
+      const label = t ? ' "' + t.slice(0, 200) + '"' : '';
+      lines.push(pad + '[' + idx + '] ' + tagLower + (a ? ' ' + a : '') + label + c);
+    } else if (['H1','H2','H3','H4','H5','H6'].includes(tag)) {
+      lines.push(pad + tagLower + ': ' + t);
+    } else if (tag === 'IMG') {
+      const alt = el.alt || el.getAttribute('aria-label') || '';
+      lines.push(pad + '[img' + (alt ? ' alt="' + alt + '"' : '') + ']');
+    } else if (tag === 'TABLE') {
+      lines.push(pad + '[table]');
+    } else if (tag === 'TR') {
+      const cells = Array.from(el.querySelectorAll('td,th')).map(c => {
+        const ci = interactive(c);
+        if (ci) { idx++; return '[' + idx + '] ' + text(c) + coords(c); }
+        return text(c);
+      }).filter(Boolean);
+      if (cells.length) lines.push(pad + '  row: ' + cells.join(' | '));
+      return;
+    } else if (INLINE.has(tag) || tag === 'P' || tag === 'LI' || tag === 'DIV' || tag === 'SECTION' || tag === 'MAIN' || tag === 'NAV' || tag === 'HEADER' || tag === 'FOOTER' || tag === 'ASIDE' || tag === 'ARTICLE') {
+      if (t && !el.children.length) {
+        lines.push(pad + t);
+        return;
+      }
+    }
+    for (const child of el.children) walk(child, depth + (isI ? 1 : (tag === 'BODY' ? 0 : 1)));
+  }
+  walk(document.body, 0);
+  return {
+    dom: lines.join('\\n'),
+    interactiveCount: idx,
+    viewportWidth: vw,
+    viewportHeight: vh,
+  };
+})()`;
+
+async function snapshot(params = {}) {
+  const tabId = await ensureAttached();
+  const tab = await chrome.tabs.get(tabId);
+  const vp = await viewport();
+  const result = await send("Runtime.evaluate", {
+    expression: DOM_SNAPSHOT_SCRIPT,
+    returnByValue: true,
+  });
+  const data = result?.result?.value || {};
+  const observationId = `${tabId}:${visualEpoch}:${crypto.randomUUID()}`;
+  const sourceRegion = { x: 0, y: 0, width: vp.width, height: vp.height };
+  rememberObservation({ observationId, tabId, visualEpoch, sourceRegion, viewportWidth: vp.width, viewportHeight: vp.height });
+  return {
+    observationId,
+    visualEpoch,
+    targetId: String(tabId),
+    url: tab.url || "",
+    title: tab.title || "",
+    viewportWidth: vp.width,
+    viewportHeight: vp.height,
+    pointer: pointerMetadata(),
+    kind: "snapshot",
+    coordinateSpace: "normalized_1000",
+    dom: data.dom || "",
+    interactiveCount: data.interactiveCount || 0,
+  };
+}
+
 async function mouseMove(params) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
@@ -785,9 +924,32 @@ async function keypress(params) {
   assertFresh(params.observationId);
   const events = keyEvents(params.keys);
   await send("Input.dispatchKeyEvent", events.down);
+  if (!events.down.modifiers && events.down.text) {
+    await send("Input.dispatchKeyEvent", {
+      type: "char",
+      text: events.down.text,
+      unmodifiedText: events.down.text,
+    });
+  }
   await send("Input.dispatchKeyEvent", events.up);
   invalidateVisualState("agent-keypress");
   return { success: true, visualEpoch };
+}
+
+async function evaluateScript(params = {}) {
+  const expression = String(params.expression || "").trim();
+  if (!expression) throw new Error("expression is required");
+  const res = await send("Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (res.exceptionDetails) {
+    const desc = res.exceptionDetails.exception?.description || res.exceptionDetails.text || "Script execution failed";
+    throw new Error(desc);
+  }
+  invalidateVisualState("agent-evaluate");
+  return { success: true, visualEpoch, value: res.result?.value };
 }
 
 function assertSafeNavigationUrl(rawUrl) {
@@ -968,6 +1130,7 @@ async function handleRpc(request, source = "remote") {
       };
     }
     case "observe": return observe(request.params || {});
+    case "snapshot": return snapshot(request.params || {});
     case "inspect_region": return inspectRegion(request.params || {});
     case "move": return mouseMove(request.params || {});
     case "click": return mouseClick(request.params || {}, 1);
@@ -985,6 +1148,8 @@ async function handleRpc(request, source = "remote") {
     case "new_tab": return newTab(request.params || {});
     case "close_tab": return closeTab(request.params || {});
     case "handle_dialog": return handleDialog(request.params || {});
+    case "evaluate": return evaluateScript(request.params || {});
+    case "reload_extension": setTimeout(() => chrome.runtime.reload(), 50); return { success: true };
     default: throw new Error(`Unknown RPC method: ${request.method}`);
   }
 }
