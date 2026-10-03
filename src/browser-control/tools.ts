@@ -159,6 +159,92 @@ export function browserTools(): Tool[] {
         additionalProperties: false,
       },
     },
+    {
+      name: "browser_click_element",
+      description: "Click an interactive element resolved live in the page. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or visible 'text'. Resolves the element's live bounding rect at execution time, moves the mouse via natural Bézier curve, and clicks with humanized hold duration and jitter. Eliminates coordinate staleness.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          ref: { type: "number", minimum: 1, description: "1-based element index from browser_snapshot" },
+          selector: { type: "string", maxLength: 1000, description: "CSS selector for the element" },
+          text: { type: "string", maxLength: 200, description: "Visible text, button label, or placeholder to match" },
+          button: { type: "string", enum: ["left", "middle", "right"], default: "left" },
+          clickCount: { type: "number", minimum: 1, maximum: 3, default: 1 },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser_type_element",
+      description: "Focus an input element and type text into it using humanized keystroke timing. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or 'queryText' (matching placeholder, label, etc.). Replays authentic keystrokes with realistic flight and hold times.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: { type: "string", maxLength: 5000, description: "Text to type into the focused element" },
+          ref: { type: "number", minimum: 1, description: "1-based element index from browser_snapshot" },
+          selector: { type: "string", maxLength: 1000, description: "CSS selector for the element" },
+          queryText: { type: "string", maxLength: 200, description: "Placeholder or label text to find the input" },
+        },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser_wait_for",
+      description: "Wait for a condition on the page. Resolves the moment the condition is met. Use 'text' to wait for specific text strings to appear, 'selector' to wait for a CSS selector, 'url' to wait for URL to match/change, or 'idle' to wait for network and DOM stability.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          text: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 200 },
+            description: "Wait until any of these text strings appear in the page",
+          },
+          selector: { type: "string", maxLength: 1000, description: "Wait until this CSS selector matches a visible element" },
+          url: { type: "string", maxLength: 2048, description: "Wait until the URL contains this substring" },
+          idle: { type: "boolean", description: "Wait until no busy/loading indicators are present" },
+          timeoutMs: { type: "number", minimum: 500, maximum: 30000, default: 10000, description: "Maximum wait time in ms" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser_select_and_advance",
+      description: "Single-turn composite action: click an option element, wait a realistic human reading/thinking dwell time, then click a continue/next/submit button, then wait for the page to transition. Returns a fresh DOM snapshot of the next page. Eliminates multi-turn LLM latency for surveys, quizzes, and wizard flows.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          target: {
+            type: "object",
+            description: "The element to select/click first",
+            properties: {
+              ref: { type: "number", minimum: 1 },
+              selector: { type: "string", maxLength: 1000 },
+              text: { type: "string", maxLength: 200 },
+            },
+            additionalProperties: false,
+          },
+          advance: {
+            type: "object",
+            description: "The continue/next/submit button to click after selecting",
+            properties: {
+              ref: { type: "number", minimum: 1 },
+              selector: { type: "string", maxLength: 1000 },
+              text: { type: "string", maxLength: 200 },
+            },
+            additionalProperties: false,
+          },
+          dwellMs: { type: "number", minimum: 1000, maximum: 15000, default: 3500, description: "Cognitive dwell time between selection and advancing in ms" },
+          waitText: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 200 },
+            description: "Text patterns to wait for after advancing",
+          },
+        },
+        required: ["target"],
+        additionalProperties: false,
+      },
+    },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the browserControl device.", inputSchema: EMPTY_SCHEMA },
   ];
 }
@@ -186,9 +272,13 @@ function assertAllowedCall(method: string, args: Record<string, any>): Record<st
     next.url = assertSafeNavigationUrl(next.url);
   } else if (method === "new_tab") {
     next.url = assertSafeNewTabUrl(typeof next.url === "string" ? next.url : undefined);
-  } else if (method === "type") {
+  } else if (method === "type" || method === "type_element") {
     if (typeof next.text === "string" && next.text.length > 5000) {
       throw Object.assign(new Error("type text must be at most 5000 characters"), { code: "INPUT_TOO_LARGE" });
+    }
+  } else if (method === "select_and_advance") {
+    if (next.dwellMs != null && (typeof next.dwellMs !== "number" || next.dwellMs < 1000 || next.dwellMs > 15000)) {
+      throw Object.assign(new Error("dwellMs must be between 1000 and 15000"), { code: "INVALID_PARAM" });
     }
   } else if (method === "keypress") {
     if (Array.isArray(next.keys)) {
@@ -253,7 +343,18 @@ export async function handleBrowserToolCall(
       case "browser_snapshot": return textResult(await route.bridge.call("snapshot", args));
       case "browser_inspect": return imageResult(await route.bridge.call("inspect_region", args));
       case "browser_move": return textResult(await mutate("move", args));
-      case "browser_click": return textResult(await mutate("click", args));
+      case "browser_click": {
+        try {
+          return textResult(await mutate("click", args));
+        } catch (e: any) {
+          if (e?.code === "STALE_OBSERVATION" && args.observationId) {
+            const snap = await route.bridge.call("snapshot", {});
+            args.observationId = snap.observationId;
+            return textResult(await mutate("click", args));
+          }
+          throw e;
+        }
+      }
       case "browser_double_click": return textResult(await mutate("double_click", args));
       case "browser_drag": return textResult(await mutate("drag", args));
       case "browser_scroll": return textResult(await mutate("scroll", args));
@@ -269,6 +370,10 @@ export async function handleBrowserToolCall(
       case "browser_close_tab": return textResult(await mutate("close_tab", args));
       case "browser_handle_dialog": return textResult(await mutate("handle_dialog", args));
       case "browser_evaluate": return textResult(await mutate("evaluate", args));
+      case "browser_click_element": return textResult(await mutate("click_element", args));
+      case "browser_type_element": return textResult(await mutate("type_element", args));
+      case "browser_wait_for": return textResult(await route.bridge.call("wait_for", args));
+      case "browser_select_and_advance": return textResult(await mutate("select_and_advance", args));
       case "browser_release_control":
         route.lease.release(clientId);
         return textResult({ success: true });

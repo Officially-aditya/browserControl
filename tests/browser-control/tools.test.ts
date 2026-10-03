@@ -40,6 +40,10 @@ describe("canonical browserControl tools", () => {
       "browser_close_tab",
       "browser_handle_dialog",
       "browser_evaluate",
+      "browser_click_element",
+      "browser_type_element",
+      "browser_wait_for",
+      "browser_select_and_advance",
       "browser_release_control",
     ]);
   });
@@ -153,5 +157,64 @@ describe("canonical browserControl tools", () => {
     expect(validShortcut.isError).toBeUndefined();
     expect((route.bridge.call as any).mock.calls).toHaveLength(1);
     expect((route.bridge.call as any).mock.calls[0]).toEqual(["keypress", { observationId: "obs-1", keys: ["Control", "a"] }]);
+  });
+
+  it("handles element targeted actions and composite advance", async () => {
+    const route = fakeRoute((method, params) => {
+      if (method === "click_element") return { success: true, visualEpoch: 2 };
+      if (method === "type_element") return { success: true, visualEpoch: 3 };
+      if (method === "wait_for") return { success: true, reason: "idle", elapsed: 200 };
+      if (method === "select_and_advance") return { success: true, visualEpoch: 4, dom: "new page" };
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    const clickRes = await handleBrowserToolCall(route, "client-a", "browser_click_element", { ref: 3 });
+    expect(clickRes.isError).toBeUndefined();
+    expect(JSON.parse(clickRes.content[0].text).success).toBe(true);
+
+    const typeRes = await handleBrowserToolCall(route, "client-a", "browser_type_element", { ref: 3, text: "hello" });
+    expect(typeRes.isError).toBeUndefined();
+    expect(JSON.parse(typeRes.content[0].text).success).toBe(true);
+
+    const waitRes = await handleBrowserToolCall(route, "client-a", "browser_wait_for", { idle: true });
+    expect(waitRes.isError).toBeUndefined();
+    expect(JSON.parse(waitRes.content[0].text).reason).toBe("idle");
+
+    const advanceRes = await handleBrowserToolCall(route, "client-a", "browser_select_and_advance", {
+      target: { ref: 2 },
+      advance: { text: "Next" },
+      dwellMs: 2000,
+    });
+    expect(advanceRes.isError).toBeUndefined();
+    expect(JSON.parse(advanceRes.content[0].text).dom).toBe("new page");
+  });
+
+  it("auto-retries browser_click on STALE_OBSERVATION by taking a fresh snapshot", async () => {
+    let callCount = 0;
+    const route = fakeRoute((method, params) => {
+      if (method === "click") {
+        callCount++;
+        if (callCount === 1) {
+          const err: any = new Error("STALE_OBSERVATION");
+          err.code = "STALE_OBSERVATION";
+          throw err;
+        }
+        return { success: true, observationId: params.observationId };
+      }
+      if (method === "snapshot") {
+        return { observationId: "obs-fresh", visualEpoch: 5 };
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    const res = await handleBrowserToolCall(route, "client-a", "browser_click", {
+      observationId: "obs-stale",
+      x: 100,
+      y: 100,
+    });
+
+    expect(res.isError).toBeUndefined();
+    expect(callCount).toBe(2);
+    expect(JSON.parse(res.content[0].text).observationId).toBe("obs-fresh");
   });
 });

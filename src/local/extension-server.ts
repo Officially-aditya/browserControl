@@ -1,4 +1,5 @@
 import http from "node:http";
+import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ExtensionBridge } from "../browser-control/bridge.js";
@@ -58,6 +59,7 @@ export async function startLocalExtensionServer(
   const bridge = options.bridge || new ExtensionBridge("local");
   const challenges = new Map<string, ChallengeRecord>();
 
+  let lastObservation: any = null;
   const server = http.createServer((request, response) => {
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || `${host}:${requestedPort}`}`);
 
@@ -66,6 +68,44 @@ export async function startLocalExtensionServer(
         ok: true,
         service: "browsercontrol-local",
         extensionConnected: bridge.connected,
+      });
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/rpc") {
+      let body = "";
+      request.on("data", chunk => body += chunk);
+      request.on("end", async () => {
+        try {
+          const { method, params } = JSON.parse(body || "{}");
+          if (!bridge.connected) {
+            writeJson(response, 503, { ok: false, error: "Extension not connected" });
+            return;
+          }
+          const effectiveParams = { ...(params || {}) };
+          if ((method === "click" || method === "type" || method === "keypress" || method === "scroll") && !effectiveParams.observationId) {
+            if (lastObservation?.observationId) {
+              effectiveParams.observationId = lastObservation.observationId;
+            }
+          }
+          const result = await bridge.call(method as any, effectiveParams);
+          if (result && (result as any).observationId) {
+            lastObservation = {
+              observationId: (result as any).observationId,
+              url: (result as any).url,
+              title: (result as any).title,
+              viewportWidth: (result as any).viewportWidth,
+              viewportHeight: (result as any).viewportHeight,
+            };
+            if ((result as any).image) {
+              fs.writeFileSync("E:/aditya/Survey/current_view.jpg", Buffer.from((result as any).image, "base64"));
+              delete (result as any).image;
+            }
+          }
+          writeJson(response, 200, { ok: true, result });
+        } catch (err: any) {
+          writeJson(response, 500, { ok: false, error: err.message });
+        }
       });
       return;
     }
