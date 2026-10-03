@@ -310,6 +310,28 @@ export class KeyboardController {
           });
 
           await this.session.send("Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            modifiers: charModifiers,
+            key: def.key,
+            code: def.code,
+            windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+            text: char,
+            unmodifiedText: char,
+          });
+
+          await this.session.send("Input.dispatchKeyEvent", {
+            type: "char",
+            modifiers: charModifiers,
+            key: def.key,
+            code: def.code,
+            text: char,
+            unmodifiedText: char,
+          });
+
+          // Realistic key hold duration (30-65ms)
+          await new Promise((r) => setTimeout(r, Math.floor(30 + Math.random() * 35)));
+
+          await this.session.send("Input.dispatchKeyEvent", {
             type: "keyUp",
             modifiers: charModifiers,
             key: def.key,
@@ -319,7 +341,9 @@ export class KeyboardController {
         }
 
         if (chars.length > 1) {
-          await new Promise((r) => setTimeout(r, 8));
+          // Human inter-key flight time (60-140ms with jitter)
+          const flightTime = Math.floor(65 + Math.random() * 75);
+          await new Promise((r) => setTimeout(r, flightTime));
         }
       }
       return;
@@ -349,6 +373,9 @@ export class KeyboardController {
 
         await this.session.send("Input.insertText", { text: char });
 
+        // Realistic key hold duration (30-60ms)
+        await new Promise((r) => setTimeout(r, Math.floor(30 + Math.random() * 30)));
+
         await this.session.send("Input.dispatchKeyEvent", {
           type: "keyUp",
           modifiers: charModifiers,
@@ -359,7 +386,9 @@ export class KeyboardController {
       }
 
       if (chars.length > 1) {
-        await new Promise((r) => setTimeout(r, 6));
+        // Human inter-key flight time (60-140ms with jitter)
+        const flightTime = Math.floor(65 + Math.random() * 75);
+        await new Promise((r) => setTimeout(r, flightTime));
       }
     }
   }

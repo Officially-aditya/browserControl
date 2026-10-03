@@ -91,6 +91,31 @@ export class MouseController {
     });
   }
 
+  private async humanMove(targetX: number, targetY: number, explicitModifiers = 0, signal?: AbortSignal): Promise<void> {
+    const startX = this.inputState.cursorX;
+    const startY = this.inputState.cursorY;
+    const dx = targetX - startX;
+    const dy = targetY - startY;
+    const distance = Math.hypot(dx, dy);
+
+    if (distance > 5) {
+      const steps = Math.min(15, Math.max(5, Math.floor(distance / 40)));
+      for (let i = 1; i <= steps; i++) {
+        if (signal?.aborted) throw new Error("ACTION_CANCELLED");
+        const t = i / steps;
+        // Ease in-out cubic
+        const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        const jitter = (Math.random() - 0.5) * Math.sin(t * Math.PI) * Math.min(8, distance * 0.04);
+        const curX = Math.round(startX + dx * ease + jitter);
+        const curY = Math.round(startY + dy * ease + jitter);
+        await this.move(curX, curY, explicitModifiers, signal);
+        const stepDelay = Math.floor(8 + Math.random() * 12);
+        await new Promise((r) => setTimeout(r, stepDelay));
+      }
+    }
+    await this.move(targetX, targetY, explicitModifiers, signal);
+  }
+
   /**
    * Dispatch mouse click
    */
@@ -103,10 +128,12 @@ export class MouseController {
   ): Promise<void> {
     if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
-    await this.move(x, y, explicitModifiers, signal);
+    await this.humanMove(x, y, explicitModifiers, signal);
+    await new Promise((r) => setTimeout(r, Math.floor(35 + Math.random() * 40)));
+
     await this.down(x, y, button, explicitModifiers, signal);
 
-    await new Promise((r) => setTimeout(r, 40));
+    await new Promise((r) => setTimeout(r, Math.floor(45 + Math.random() * 45)));
     if (signal?.aborted) throw new Error("ACTION_CANCELLED");
 
     await this.up(x, y, button, explicitModifiers, signal);
