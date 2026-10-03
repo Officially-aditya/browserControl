@@ -9,6 +9,15 @@ import {
 } from "./gateway-connection.js";
 import { createLocalConnection } from "./local-connection.js";
 import { keyDefinition, keyEvents } from "./keyboard.js";
+import {
+  randomBetween, bezierPath, stepTimings,
+  preClickDelayMs, clickHoldMs, clickJitter,
+  keyHoldMs, charFlightMs, wordPauseMs, shortcutHoldMs,
+  scrollChunks, scrollStepDelayMs,
+  wordCount, minDwellMs,
+} from "./human-input.js";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const DEBUGGER_VERSION = "1.3";
 const VISUAL_INVALIDATION_BINDING = "__browserControlVisualInvalidated";
@@ -36,6 +45,9 @@ const MUTATING_RPC_METHODS = new Set([
   "close_tab",
   "handle_dialog",
   "evaluate",
+  "click_element",
+  "type_element",
+  "select_and_advance",
 ]);
 const CONTROL_SURFACE_HOSTS = new Set([
   "claude.ai",
@@ -561,17 +573,32 @@ function rememberObservation(record) {
   }
 }
 
-function assertFresh(observationId) {
+function assertFresh(observationId, { softMode = false } = {}) {
   if (!observationId) {
     const err = new Error("observationId is required for visual or focus-dependent browser actions");
     err.code = "OBSERVATION_REQUIRED";
     throw err;
   }
   const record = observations.get(String(observationId));
-  if (!record || record.tabId !== attachedTabId || record.visualEpoch !== visualEpoch) {
-    const err = new Error(`STALE_OBSERVATION: control context changed after the screenshot (${lastInvalidationReason})`);
+  if (!record) {
+    const err = new Error("STALE_OBSERVATION: observation expired or not found");
     err.code = "STALE_OBSERVATION";
     throw err;
+  }
+  if (record.tabId !== attachedTabId) {
+    const err = new Error("STALE_OBSERVATION: tab changed since observation");
+    err.code = "STALE_OBSERVATION";
+    throw err;
+  }
+  if (!softMode && record.visualEpoch !== visualEpoch) {
+    const age = Date.now() - (lastInvalidatedAt || 0);
+    const cosmetic = ["agent-move", "agent-scroll", "resize", "animation", "agent-type", "agent-click-element", "agent-type-element"]
+      .some((r) => lastInvalidationReason?.includes(r));
+    if (!cosmetic || age > 2000) {
+      const err = new Error(`STALE_OBSERVATION: control context changed after the screenshot (${lastInvalidationReason})`);
+      err.code = "STALE_OBSERVATION";
+      throw err;
+    }
   }
   return record;
 }
@@ -823,10 +850,27 @@ async function snapshot(params = {}) {
   };
 }
 
+/** Move cursor along a Bézier curve from current pointer to target viewport coords. */
+async function humanMouseMoveTo(targetX, targetY) {
+  const ptr = pointerMetadata();
+  let startX = 0, startY = 0;
+  if (ptr.known && ptr.insideViewport) {
+    const vp = await viewport();
+    startX = (ptr.x / 1000) * vp.width;
+    startY = (ptr.y / 1000) * vp.height;
+  }
+  const path = bezierPath({ x: startX, y: startY }, { x: targetX, y: targetY });
+  const timings = stepTimings(path.length);
+  for (let i = 0; i < path.length; i++) {
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: path[i].x, y: path[i].y, button: "none" });
+    if (i < path.length - 1) await sleep(timings[i]);
+  }
+}
+
 async function mouseMove(params) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
-  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y, button: "none" });
+  await humanMouseMoveTo(p.x, p.y);
   setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState("agent-move");
   return { success: true, visualEpoch, pointer: pointerMetadata() };
@@ -836,8 +880,25 @@ async function mouseClick(params, clickCount = 1) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
   const button = params.button || "left";
+
+  // 1. Move to target along Bézier curve
+  await humanMouseMoveTo(p.x, p.y);
+
+  // 2. Pre-click hover delay
+  await sleep(preClickDelayMs());
+
+  // 3. Press with hold duration
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount });
-  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, clickCount });
+  await sleep(clickHoldMs());
+
+  // 4. Release with slight jitter
+  const jitter = clickJitter();
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: p.x + jitter.dx, y: p.y + jitter.dy,
+    button, clickCount,
+  });
+
   setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
   return { success: true, visualEpoch, pointer: pointerMetadata() };
@@ -848,13 +909,34 @@ async function drag(params) {
   if (!Array.isArray(params.path) || params.path.length < 2) throw new Error("drag path requires at least two points");
   if (params.path.length > 50) throw new Error("drag path must have at most 50 points");
   const points = params.path.map((point) => normalizedPointToSource(point.x, point.y, record));
+
+  // Move to start with Bézier
   const first = points[0];
-  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: first.x, y: first.y, button: "none" });
+  await humanMouseMoveTo(first.x, first.y);
+  await sleep(randomBetween(30, 60));
+
+  // Press
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: first.x, y: first.y, button: "left", clickCount: 1 });
-  for (const point of points.slice(1)) {
-    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "left", buttons: 1 });
+  await sleep(randomBetween(30, 60));
+
+  // Drag through waypoints with sub-steps
+  for (let i = 1; i < points.length; i++) {
+    const from = points[i - 1];
+    const to = points[i];
+    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const subSteps = Math.max(1, Math.ceil(dist / 20));
+    for (let s = 1; s <= subSteps; s++) {
+      const t = s / subSteps;
+      const x = Math.round(from.x + (to.x - from.x) * t);
+      const y = Math.round(from.y + (to.y - from.y) * t);
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "left", buttons: 1 });
+      await sleep(randomBetween(8, 16));
+    }
   }
+
+  // Release
   const last = points[points.length - 1];
+  await sleep(randomBetween(30, 60));
   await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: last.x, y: last.y, button: "left", clickCount: 1 });
   setPointerFromRecordPoint(last, record, "agent");
   invalidateVisualState("agent-drag");
@@ -868,26 +950,33 @@ async function scroll(params) {
   if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) throw new Error("scroll deltas must be finite numbers");
   if (Math.abs(deltaX) > 4000 || Math.abs(deltaY) > 4000) throw new Error("scroll deltas must be within ±4000");
   const p = normalizedPointToSource(params.x ?? 500, params.y ?? 500, record);
-  await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX, deltaY });
+
+  // Chunked scrolling
+  const chunks = scrollChunks(deltaX, deltaY);
+  for (let i = 0; i < chunks.length; i++) {
+    await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: chunks[i].dx, deltaY: chunks[i].dy });
+    if (i < chunks.length - 1) await sleep(scrollStepDelayMs());
+  }
+
   setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState("agent-scroll");
-  return { success: true, visualEpoch, pointer: pointerMetadata() };
+  return { success: true, visualEpoch };
 }
 
-async function typeText(params) {
-  assertFresh(params.observationId);
-  const text = String(params.text ?? "");
-  if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
 
+async function humanTypeText(text) {
   const chars = Array.from(text);
-  for (const char of chars) {
+  for (let i = 0; i < chars.length; i++) {
+    const char = chars[i];
     if (char === "\n" || char === "\r") {
       const events = keyEvents(["Enter"]);
       await send("Input.dispatchKeyEvent", events.down);
+      await sleep(keyHoldMs());
       await send("Input.dispatchKeyEvent", events.up);
     } else if (char === "\t") {
       const events = keyEvents(["Tab"]);
       await send("Input.dispatchKeyEvent", events.down);
+      await sleep(keyHoldMs());
       await send("Input.dispatchKeyEvent", events.up);
     } else {
       const def = keyDefinition(char);
@@ -903,6 +992,7 @@ async function typeText(params) {
         unmodifiedText: char,
       });
       await send("Input.insertText", { text: char });
+      await sleep(keyHoldMs());
       await send("Input.dispatchKeyEvent", {
         type: "keyUp",
         modifiers,
@@ -911,10 +1001,26 @@ async function typeText(params) {
         windowsVirtualKeyCode: def.windowsVirtualKeyCode,
       });
     }
-    if (chars.length > 1) {
-      await new Promise((resolve) => setTimeout(resolve, 6));
+
+    if (i < chars.length - 1) {
+      let delay = charFlightMs();
+      if (char === " ") {
+        delay += wordPauseMs();
+      }
+      if (chars.length > 500) {
+        delay = Math.min(delay, 20);
+      }
+      await sleep(delay);
     }
   }
+}
+
+async function typeText(params) {
+  assertFresh(params.observationId);
+  const text = String(params.text ?? "");
+  if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
+
+  await humanTypeText(text);
 
   invalidateVisualState("agent-type");
   return { success: true, visualEpoch };
@@ -931,9 +1037,343 @@ async function keypress(params) {
       unmodifiedText: events.down.text,
     });
   }
+  await sleep(shortcutHoldMs());
   await send("Input.dispatchKeyEvent", events.up);
   invalidateVisualState("agent-keypress");
   return { success: true, visualEpoch };
+}
+
+const RESOLVE_ELEMENT_SCRIPT = `(selector, ref, text) => {
+  function vis(el) {
+    if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden';
+  }
+  function interactive(el) {
+    const tag = el.tagName;
+    if (['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag)) return true;
+    const role = el.getAttribute('role');
+    if (role && ['button','link','textbox','checkbox','radio','combobox','listbox','menuitem','tab','switch','slider','searchbox','option','menuitemcheckbox','menuitemradio','treeitem'].includes(role)) return true;
+    if (el.contentEditable === 'true') return true;
+    if (el.getAttribute('tabindex') !== null && Number(el.getAttribute('tabindex')) >= 0) return true;
+    if (el.onclick || el.getAttribute('onclick')) return true;
+    return false;
+  }
+
+  let el = null;
+  if (selector) {
+    el = document.querySelector(selector);
+  } else if (typeof ref === 'number' && ref > 0) {
+    const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
+    let currentIdx = 0;
+    function walk(node) {
+      if (!node || node.nodeType !== 1) return;
+      if (SKIP.has(node.tagName)) return;
+      if (!vis(node)) return;
+      if (interactive(node)) {
+        currentIdx++;
+        if (currentIdx === ref) {
+          el = node;
+          return;
+        }
+      }
+      for (const child of node.children) {
+        walk(child);
+        if (el) return;
+      }
+    }
+    walk(document.body);
+  } else if (text) {
+    const target = String(text).trim().toLowerCase();
+    const candidateNodes = document.querySelectorAll('a, button, input, select, textarea, label, [role="button"], [role="radio"], [role="checkbox"], [role="option"], [role="tab"], p, span, div, li, td, h1, h2, h3, h4, h5, h6');
+    for (const node of candidateNodes) {
+      if (!vis(node)) continue;
+      const t = (node.textContent || node.value || node.getAttribute('aria-label') || '').trim().toLowerCase();
+      if (t === target || t.includes(target)) {
+        el = node;
+        if (t === target) break;
+      }
+    }
+  }
+
+  if (!el) return null;
+  el.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' });
+  const r = el.getBoundingClientRect();
+  return {
+    x: r.left + r.width / 2,
+    y: r.top + r.height / 2,
+    width: r.width,
+    height: r.height,
+    tag: el.tagName.toLowerCase(),
+    id: el.id || '',
+    text: (el.textContent || el.value || '').trim().slice(0, 100),
+  };
+};`;
+
+async function resolveElement(params = {}) {
+  await ensureAttached();
+  const selector = params.selector ? String(params.selector) : null;
+  const ref = typeof params.ref === "number" ? params.ref : null;
+  const text = params.text ? String(params.text) : null;
+
+  if (!selector && ref == null && !text) {
+    throw new Error("Must provide selector, ref, or text to resolve an element");
+  }
+
+  const res = await send("Runtime.evaluate", {
+    expression: `(${RESOLVE_ELEMENT_SCRIPT})(${JSON.stringify(selector)}, ${JSON.stringify(ref)}, ${JSON.stringify(text)})`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  const rect = res?.result?.value;
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    throw new Error(`Element not found or not visible: ${selector || (ref ? `ref #${ref}` : `"${text}"`)}`);
+  }
+  return rect;
+}
+
+async function clickElement(params = {}) {
+  const rect = await resolveElement(params);
+
+  const jitterX = (Math.random() - 0.5) * Math.min(8, rect.width * 0.3);
+  const jitterY = (Math.random() - 0.5) * Math.min(8, rect.height * 0.3);
+  const targetX = Math.round(rect.x + jitterX);
+  const targetY = Math.round(rect.y + jitterY);
+  const button = params.button || "left";
+  const clickCount = params.clickCount || 1;
+
+  await humanMouseMoveTo(targetX, targetY);
+  await sleep(preClickDelayMs());
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: targetX, y: targetY, button, clickCount });
+  await sleep(clickHoldMs());
+
+  const jitter = clickJitter();
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: targetX + jitter.dx,
+    y: targetY + jitter.dy,
+    button,
+    clickCount,
+  });
+
+  const vp = await viewport();
+  setPointerFromViewport(targetX, targetY, vp.width, vp.height, "agent");
+  invalidateVisualState("agent-click-element");
+  return { success: true, visualEpoch, clicked: rect };
+}
+
+const FOCUS_ELEMENT_SCRIPT = `(selector, ref, text) => {
+  function vis(el) {
+    if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden';
+  }
+  let el = null;
+  if (selector) {
+    el = document.querySelector(selector);
+  } else if (typeof ref === 'number' && ref > 0) {
+    const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
+    let currentIdx = 0;
+    function walk(node) {
+      if (!node || node.nodeType !== 1) return;
+      if (SKIP.has(node.tagName)) return;
+      if (!vis(node)) return;
+      const tag = node.tagName;
+      const isI = ['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag) ||
+        node.getAttribute('role') || node.contentEditable === 'true' ||
+        (node.getAttribute('tabindex') !== null && Number(node.getAttribute('tabindex')) >= 0) ||
+        node.onclick;
+      if (isI) {
+        currentIdx++;
+        if (currentIdx === ref) {
+          el = node;
+          return;
+        }
+      }
+      for (const child of node.children) {
+        walk(child);
+        if (el) return;
+      }
+    }
+    walk(document.body);
+  } else if (text) {
+    const target = String(text).trim().toLowerCase();
+    const candidateNodes = document.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="textbox"]');
+    for (const node of candidateNodes) {
+      if (!vis(node)) continue;
+      const t = (node.placeholder || node.value || node.textContent || node.getAttribute('aria-label') || '').trim().toLowerCase();
+      if (t === target || t.includes(target)) {
+        el = node;
+        break;
+      }
+    }
+  }
+
+  if (!el) return null;
+  el.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' });
+  el.focus();
+  if (typeof el.select === 'function') el.select();
+  return {
+    tag: el.tagName.toLowerCase(),
+    id: el.id || '',
+    name: el.name || '',
+  };
+};`;
+
+async function typeElement(params = {}) {
+  const text = String(params.text ?? "");
+  if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
+
+  await ensureAttached();
+  const selector = params.selector ? String(params.selector) : null;
+  const ref = typeof params.ref === "number" ? params.ref : null;
+  const queryText = params.queryText ? String(params.queryText) : null;
+
+  const res = await send("Runtime.evaluate", {
+    expression: `(${FOCUS_ELEMENT_SCRIPT})(${JSON.stringify(selector)}, ${JSON.stringify(ref)}, ${JSON.stringify(queryText)})`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  if (!res?.result?.value) {
+    throw new Error(`Element to focus not found: ${selector || (ref ? `ref #${ref}` : `"${queryText}"`)}`);
+  }
+
+  await sleep(randomBetween(50, 120));
+  await humanTypeText(text);
+
+  invalidateVisualState("agent-type-element");
+  return { success: true, visualEpoch, focused: res.result.value };
+}
+
+function buildCheckScript(params) {
+  const conditions = [];
+  if (Array.isArray(params.text) && params.text.length > 0) {
+    const escaped = JSON.stringify(params.text);
+    conditions.push(`(() => {
+      const body = document.body?.innerText || '';
+      const texts = ${escaped};
+      for (const t of texts) {
+        if (body.includes(t)) return { met: true, reason: 'text: ' + t };
+      }
+      return null;
+    })()`);
+  }
+  if (params.selector) {
+    conditions.push(`(() => {
+      const el = document.querySelector(${JSON.stringify(params.selector)});
+      if (el) {
+        const s = getComputedStyle(el);
+        if (s.display !== 'none' && s.visibility !== 'hidden') {
+          return { met: true, reason: 'selector: ' + ${JSON.stringify(params.selector)} };
+        }
+      }
+      return null;
+    })()`);
+  }
+  if (params.url) {
+    conditions.push(`(() => {
+      return location.href.includes(${JSON.stringify(params.url)})
+        ? { met: true, reason: 'url: ' + location.href } : null;
+    })()`);
+  }
+  if (params.idle) {
+    conditions.push(`(() => {
+      const busy = document.querySelector('[aria-busy="true"], .loading, .spinner, [data-loading="true"]');
+      return !busy ? { met: true, reason: 'idle' } : null;
+    })()`);
+  }
+
+  return `(() => {
+    ${conditions.map((c, i) => `const c${i} = ${c}; if (c${i}) return c${i};`).join("\n    ")}
+    return { met: false };
+  })()`;
+}
+
+async function waitFor(params = {}) {
+  await ensureAttached();
+  const timeout = Math.min(30000, Math.max(500, Number(params.timeoutMs) || 10000));
+  const startedAt = Date.now();
+
+  const script = buildCheckScript(params);
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(pollInterval);
+      resolve({
+        success: false,
+        reason: "timeout",
+        elapsed: Date.now() - startedAt,
+        visualEpoch,
+      });
+    }, timeout);
+
+    const pollInterval = setInterval(async () => {
+      if (resolved) return;
+      try {
+        const check = await send("Runtime.evaluate", {
+          expression: script,
+          returnByValue: true,
+        });
+        if (check?.result?.value?.met) {
+          resolved = true;
+          clearTimeout(timer);
+          clearInterval(pollInterval);
+          invalidateVisualState("wait-condition-met");
+          resolve({
+            success: true,
+            reason: check.result.value.reason,
+            elapsed: Date.now() - startedAt,
+            visualEpoch,
+          });
+        }
+      } catch {
+        // Navigation or context reload occurring, keep polling
+      }
+    }, 200);
+  });
+}
+
+async function selectAndAdvance(params = {}) {
+  const dwellMs = Math.max(1000, Math.min(15000, Number(params.dwellMs) || 3500));
+
+  // 1. Click target option
+  const targetResult = await clickElement(params.target || {});
+
+  // 2. Cognitive reading/thinking dwell time
+  const actualDwell = dwellMs + randomBetween(-300, 300);
+  await sleep(actualDwell);
+
+  // 3. Click advance button if specified
+  let advanceResult = null;
+  if (params.advance) {
+    advanceResult = await clickElement(params.advance);
+  }
+
+  // 4. Wait for transition
+  if (Array.isArray(params.waitText) && params.waitText.length > 0) {
+    await waitFor({ text: params.waitText, timeoutMs: 10000 });
+  } else {
+    await waitFor({ idle: true, timeoutMs: 5000 });
+  }
+
+  // Short settle time
+  await sleep(100);
+
+  // 5. Take fresh DOM snapshot
+  const snap = await snapshot();
+  return {
+    success: true,
+    visualEpoch,
+    clickedTarget: targetResult.clicked,
+    clickedAdvance: advanceResult?.clicked || null,
+    actualDwellMs: Math.round(actualDwell),
+    ...snap,
+  };
 }
 
 async function evaluateScript(params = {}) {
@@ -1149,6 +1589,10 @@ async function handleRpc(request, source = "remote") {
     case "close_tab": return closeTab(request.params || {});
     case "handle_dialog": return handleDialog(request.params || {});
     case "evaluate": return evaluateScript(request.params || {});
+    case "click_element": return clickElement(request.params || {});
+    case "type_element": return typeElement(request.params || {});
+    case "wait_for": return waitFor(request.params || {});
+    case "select_and_advance": return selectAndAdvance(request.params || {});
     case "reload_extension": setTimeout(() => chrome.runtime.reload(), 50); return { success: true };
     default: throw new Error(`Unknown RPC method: ${request.method}`);
   }
