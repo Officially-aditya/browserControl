@@ -2,9 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import path from "node:path";
+import { PNG } from "pngjs";
 import { launchRealChrome, type LaunchedChrome } from "../helpers/chrome-launcher.js";
 import { startTestServer, type TestServer } from "../fixtures/test-server.js";
 import { ChromeController } from "../../src/controller.js";
+import { decodeImageDimensions } from "../../src/screen/image-decoder.js";
 
 const canaryConfigured = Boolean(process.env.CHROME_PATH);
 
@@ -72,6 +74,121 @@ describe.skipIf(!canaryConfigured)("Real Chrome extension -> local stdio MCP can
     expect(names).toContain("browser_tabs");
     expect(names).not.toContain("computer_action");
     expect(names).not.toContain("browser_action");
+  });
+
+  it("resizes and crops screenshots without changing the live viewport or scroll position", async () => {
+    const initial = await client.callTool({ name: "browser_observe", arguments: {} });
+    expect(initial.isError).toBeFalsy();
+    // Let Chrome's initial debugger notification finish its viewport animation.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const targets = await controller.connection.send("Target.getTargets");
+    const worker = targets.targetInfos.find((target: any) => target.type === "service_worker" && target.url.endsWith("/service-worker.js"));
+    expect(worker).toBeTruthy();
+    const { sessionId } = await controller.connection.send("Target.attachToTarget", { targetId: worker.targetId, flatten: true });
+    await controller.connection.send("Runtime.evaluate", {
+      expression: `(() => {
+        globalThis.__CAPTURE_REQUESTS__ = [];
+        globalThis.__CAPTURE_SEND__ = chrome.debugger.sendCommand;
+        chrome.debugger.sendCommand = (...args) => {
+          if (args[1] === "Page.captureScreenshot") __CAPTURE_REQUESTS__.push(args[2]);
+          return __CAPTURE_SEND__.apply(chrome.debugger, args);
+        };
+      })()`,
+    }, sessionId);
+    await controller.session.send("Runtime.evaluate", {
+      expression: `(() => {
+        const spacer = document.createElement("div");
+        spacer.id = "capture-spacer";
+        spacer.style.height = "300vh";
+        document.body.appendChild(spacer);
+        scrollTo(0, 321);
+        const marker = document.createElement("div");
+        marker.id = "capture-marker";
+        marker.style.cssText = "position:fixed;background:rgb(230,20,40);z-index:999999;pointer-events:none;";
+        marker.style.left = visualViewport.width / 4 + "px";
+        marker.style.top = visualViewport.height / 4 + "px";
+        marker.style.width = visualViewport.width / 4 + "px";
+        marker.style.height = visualViewport.height / 4 + "px";
+        document.body.appendChild(marker);
+        return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
+          const geometry = () => [innerWidth, innerHeight, visualViewport.width, visualViewport.height, scrollX, scrollY];
+          const baseline = JSON.stringify(geometry());
+          window.__CAPTURE_CHANGES__ = [];
+          window.__CAPTURE_WATCH__ = () => {
+            const current = JSON.stringify(geometry());
+            if (current !== baseline) window.__CAPTURE_CHANGES__.push(current);
+          };
+          addEventListener("resize", window.__CAPTURE_WATCH__);
+          addEventListener("scroll", window.__CAPTURE_WATCH__);
+          visualViewport.addEventListener("resize", window.__CAPTURE_WATCH__);
+          resolve();
+        })));
+      })()`,
+      awaitPromise: true,
+    });
+    try {
+      let metadata: any;
+      for (const format of ["jpeg", "webp", "png"]) {
+        const observation = await client.callTool({
+          name: "browser_observe",
+          arguments: { format, maxLongEdge: 640 },
+        });
+        expect(observation.isError).toBeFalsy();
+        metadata = JSON.parse((observation.content[0] as any).text);
+        const image = Buffer.from((observation.content[1] as any).data, "base64");
+        expect(decodeImageDimensions(image)).toMatchObject({ width: metadata.imageWidth, height: metadata.imageHeight });
+        expect(Math.max(metadata.imageWidth, metadata.imageHeight)).toBeLessThanOrEqual(640);
+      }
+
+      for (let level = 0; level < 2; level++) {
+        const region = await client.callTool({
+          name: "browser_inspect",
+          arguments: {
+            observationId: metadata.observationId,
+            x: 250, y: 250,
+            width: level === 0 ? 250 : 500,
+            height: level === 0 ? 250 : 500,
+          },
+        });
+        expect(region.isError).toBeFalsy();
+        metadata = JSON.parse((region.content[0] as any).text);
+        const png = PNG.sync.read(Buffer.from((region.content[1] as any).data, "base64"));
+        expect(png.width).toBe(metadata.imageWidth);
+        expect(png.height).toBe(metadata.imageHeight);
+        const center = (Math.floor(png.height / 2) * png.width + Math.floor(png.width / 2)) * 4;
+        expect([...png.data.subarray(center, center + 4)]).toEqual([230, 20, 40, 255]);
+      }
+
+      const changes = await controller.session.send("Runtime.evaluate", {
+        expression: "(__CAPTURE_WATCH__(), __CAPTURE_CHANGES__)",
+        returnByValue: true,
+      });
+      expect(changes.result.value).toEqual([]);
+      const captures = await controller.connection.send("Runtime.evaluate", {
+        expression: "__CAPTURE_REQUESTS__",
+        returnByValue: true,
+      }, sessionId);
+      expect(captures.result.value).toHaveLength(5);
+      for (const capture of captures.result.value) {
+        expect(capture.clip).toBeUndefined();
+        expect(capture.captureBeyondViewport).toBe(false);
+      }
+    } finally {
+      await controller.connection.send("Runtime.evaluate", {
+        expression: "chrome.debugger.sendCommand = __CAPTURE_SEND__",
+      }, sessionId);
+      await controller.connection.send("Target.detachFromTarget", { sessionId });
+      await controller.session.send("Runtime.evaluate", {
+        expression: `(() => {
+          removeEventListener("resize", window.__CAPTURE_WATCH__);
+          removeEventListener("scroll", window.__CAPTURE_WATCH__);
+          visualViewport.removeEventListener("resize", window.__CAPTURE_WATCH__);
+          document.getElementById("capture-marker")?.remove();
+          document.getElementById("capture-spacer")?.remove();
+          scrollTo(0, 0);
+        })()`,
+      });
+    }
   });
 
   it("observes and clicks the existing Chrome tab without using the relay", async () => {

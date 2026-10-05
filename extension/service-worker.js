@@ -9,6 +9,7 @@ import {
 } from "./gateway-connection.js";
 import { createLocalConnection } from "./local-connection.js";
 import { keyDefinition, keyEvents } from "./keyboard.js";
+import { captureViewportScreenshot } from "./screenshot.js";
 import {
   randomBetween, bezierPath, stepTimings,
   preClickDelayMs, clickHoldMs, clickJitter,
@@ -544,9 +545,16 @@ async function send(method, params = {}) {
 async function viewport() {
   const metrics = await send("Page.getLayoutMetrics");
   const vv = metrics.cssVisualViewport || metrics.visualViewport;
+  // Native screenshots include scrollbars; CSS visual viewport dimensions do not.
+  const surface = await send("Runtime.evaluate", {
+    expression: "({ width: innerWidth / (visualViewport?.scale || 1), height: innerHeight / (visualViewport?.scale || 1) })",
+    returnByValue: true,
+  });
   return {
     width: vv?.clientWidth ?? vv?.width,
     height: vv?.clientHeight ?? vv?.height,
+    surfaceWidth: surface.result.value.width,
+    surfaceHeight: surface.result.value.height,
     pageX: vv?.pageX ?? 0,
     pageY: vv?.pageY ?? 0,
   };
@@ -636,21 +644,7 @@ async function observe(params = {}) {
   const format = params.format || "jpeg";
   const quality = params.quality ?? 82;
   const maxLongEdge = Math.min(2000, Math.max(480, Number(params.maxLongEdge) || 1280));
-  const longEdge = Math.max(vp.width, vp.height);
-  const scale = longEdge > 0 ? Math.min(1, maxLongEdge / longEdge) : 1;
-  const shot = await captureScreenshot({
-    format,
-    ...(format === "png" ? {} : { quality }),
-    fromSurface: true,
-    captureBeyondViewport: false,
-    clip: {
-      x: vp.pageX,
-      y: vp.pageY,
-      width: vp.width,
-      height: vp.height,
-      scale,
-    },
-  });
+  const shot = await captureViewportScreenshot(captureScreenshot, vp, { format, quality, maxLongEdge });
   const observationId = `${tabId}:${visualEpoch}:${crypto.randomUUID()}`;
   const sourceRegion = { x: 0, y: 0, width: vp.width, height: vp.height };
   rememberObservation({ observationId, tabId, visualEpoch, sourceRegion, viewportWidth: vp.width, viewportHeight: vp.height });
@@ -662,9 +656,9 @@ async function observe(params = {}) {
     title: tab.title || "",
     viewportWidth: vp.width,
     viewportHeight: vp.height,
-    imageWidth: Math.max(1, Math.round(vp.width * scale)),
-    imageHeight: Math.max(1, Math.round(vp.height * scale)),
-    imageScale: scale,
+    imageWidth: shot.width,
+    imageHeight: shot.height,
+    imageScale: shot.scale,
     sourceRegion,
     pointer: pointerMetadata(),
     kind: "overview",
@@ -680,19 +674,7 @@ async function inspectRegion(params = {}) {
   const region = normalizedRegionToSource(params, source.sourceRegion);
   const format = params.format || "png";
   const quality = params.quality ?? 90;
-  const shot = await captureScreenshot({
-    format,
-    ...(format === "png" ? {} : { quality }),
-    fromSurface: true,
-    captureBeyondViewport: false,
-    clip: {
-      x: vp.pageX + region.x,
-      y: vp.pageY + region.y,
-      width: region.width,
-      height: region.height,
-      scale: 1,
-    },
-  });
+  const shot = await captureViewportScreenshot(captureScreenshot, vp, { format, quality, region });
   const observationId = `${attachedTabId}:${visualEpoch}:${crypto.randomUUID()}`;
   rememberObservation({ observationId, tabId: attachedTabId, visualEpoch, sourceRegion: region, viewportWidth: vp.width, viewportHeight: vp.height });
   return {
@@ -700,9 +682,9 @@ async function inspectRegion(params = {}) {
     sourceObservationId: params.observationId,
     visualEpoch,
     targetId: String(attachedTabId),
-    imageWidth: Math.round(region.width),
-    imageHeight: Math.round(region.height),
-    imageScale: 1,
+    imageWidth: shot.width,
+    imageHeight: shot.height,
+    imageScale: shot.scale,
     sourceRegion: region,
     pointer: pointerMetadata(),
     kind: "region",
