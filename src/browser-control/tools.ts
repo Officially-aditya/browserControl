@@ -66,7 +66,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_snapshot",
-      description: "Fast DOM snapshot of the current page. Returns a structured text representation of visible elements with interactive elements annotated with [index] markers and normalized (x,y) coordinates in 0-1000 space. Much faster than browser_observe (no screenshot encoding). Use this as the primary observation tool — fall back to browser_observe only when you need pixel-level visual context (e.g. canvas, images, charts). The returned observationId works with all action tools (click, type, scroll, etc.).",
+      description: "Fast DOM snapshot of the current page. Returns a structured text representation of visible elements with interactive elements annotated with [index] markers and normalized (x,y) coordinates in 0-1000 space. Much faster than browser_observe (no screenshot encoding). Use this as the primary observation tool — fall back to browser_observe only when you need pixel-level visual context (e.g. canvas, images, charts). The returned observationId works with all action tools (click, type, scroll, etc.). When multiple next actions are already known, execute them together with browser_action_queue, which returns the next snapshot.",
       inputSchema: {
         type: "object" as const,
         properties: {},
@@ -161,7 +161,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_click_element",
-      description: "Click an interactive element resolved live in the page. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or visible 'text'. Resolves the element's live bounding rect at execution time, moves the mouse via natural Bézier curve, and clicks with humanized hold duration and jitter. Eliminates coordinate staleness.",
+      description: "Click an interactive element resolved live in the page. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or visible 'text'. Resolves the element's live bounding rect at execution time, moves the mouse via natural Bézier curve, and clicks with humanized hold duration and jitter. Eliminates coordinate staleness. For multiple known clicks or form inputs, prefer browser_action_queue to separate tool calls.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -176,7 +176,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_type_element",
-      description: "Focus an input element and type text into it using humanized keystroke timing. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or 'queryText' (matching placeholder, label, etc.). Replays authentic keystrokes with realistic flight and hold times.",
+      description: "Focus an input element and type text into it using humanized keystroke timing. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or 'queryText' (matching placeholder, label, etc.). Replays authentic keystrokes with realistic flight and hold times. For multiple known inputs or a type-then-click sequence, prefer browser_action_queue.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -247,17 +247,18 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_action_queue",
-      description: "Batch/Queue execution: perform a sequential series of actions (clicks, typing, scrolls, waits) on the current page in a single turn without multi-turn LLM latency. Cursor moves organically between targets with natural dwell times, clicks with Gaussian distribution, and returns a fresh DOM snapshot of the next page upon transition.",
+      description: 'Execute multiple known actions sequentially in ONE tool call. Prefer this over separate click/type/scroll/wait calls when the next steps are already known, such as filling several fields then clicking Submit, or selecting several options then Next. Supports click, type, scroll, wait only. No observationId is needed: click/type targets resolve live. Example: {"queue":[{"type":"type","target":{"text":"Email"},"text":"ada@example.com"},{"type":"click","target":{"text":"Next"}}]}. Each target uses ref from browser_snapshot, selector, or text (placeholder/label for typing). Prefer selectors or text if earlier actions change the DOM; refs can shift. Batch only until you need new page information. Returns completedActions, per-action results, and a final snapshot; stops on a failed action and reports its zero-based failedActionIndex. timeoutMs controls only the final wait, not the whole queue.',
       inputSchema: {
         type: "object" as const,
         properties: {
           queue: {
             type: "array",
-            description: "List of actions to execute in sequence",
+            minItems: 1,
+            description: "Actions in execution order. Put field values in item.text and the element locator in item.target.",
             items: {
               type: "object",
               properties: {
-                type: { type: "string", enum: ["click", "type", "scroll", "wait"], default: "click" },
+                type: { type: "string", enum: ["click", "type", "scroll", "wait"], default: "click", description: "Action kind; defaults to click when omitted" },
                 target: {
                   type: "object",
                   properties: {
@@ -269,9 +270,11 @@ export function browserTools(): Tool[] {
                 },
                 text: { type: "string", maxLength: 5000, description: "Text to type (for type action)" },
                 dwellMs: { type: "number", minimum: 0, maximum: 15000, description: "Dwell time after this action in ms" },
-                deltaX: { type: "number", description: "Horizontal scroll delta" },
-                deltaY: { type: "number", description: "Vertical scroll delta" },
-                ms: { type: "number", description: "Wait duration in ms" },
+                x: { type: "number", minimum: 0, maximum: 1000, default: 500, description: "Normalized scroll position" },
+                y: { type: "number", minimum: 0, maximum: 1000, default: 500, description: "Normalized scroll position" },
+                deltaX: { type: "number", minimum: -4000, maximum: 4000, description: "Horizontal scroll delta in CSS pixels" },
+                deltaY: { type: "number", minimum: -4000, maximum: 4000, description: "Vertical scroll delta in CSS pixels" },
+                ms: { type: "number", minimum: 0, maximum: 30000, default: 1000, description: "Wait duration in ms (for wait action)" },
               },
               additionalProperties: false,
             },
@@ -279,7 +282,7 @@ export function browserTools(): Tool[] {
           waitText: {
             type: "array",
             items: { type: "string", minLength: 1, maxLength: 200 },
-            description: "Text patterns to wait for after the queue finishes",
+            description: "Wait until any of these texts appear after all actions. A timeout is reported as a failed queue.",
           },
           waitForIdle: { type: "boolean", default: true, description: "Wait for page network/DOM idle after queue" },
           timeoutMs: { type: "number", minimum: 500, maximum: 30000, default: 10000 },
@@ -318,6 +321,25 @@ function assertAllowedCall(method: string, args: Record<string, any>): Record<st
   } else if (method === "type" || method === "type_element") {
     if (typeof next.text === "string" && next.text.length > 5000) {
       throw Object.assign(new Error("type text must be at most 5000 characters"), { code: "INPUT_TOO_LARGE" });
+    }
+  } else if (method === "action_queue") {
+    if (!Array.isArray(next.queue) || next.queue.length === 0) {
+      throw Object.assign(new Error("queue must be a non-empty array of actions"), { code: "INVALID_PARAM" });
+    }
+    for (const [index, item] of next.queue.entries()) {
+      if (!item || typeof item !== "object" || !["click", "type", "scroll", "wait"].includes(item.type || "click")) {
+        throw Object.assign(new Error(`Unsupported queue action type at index ${index}: ${item?.type}`), { code: "INVALID_PARAM" });
+      }
+      if (item.type === "type") {
+        if (typeof item.text !== "string") throw Object.assign(new Error(`queue[${index}].text is required for typing`), { code: "INVALID_PARAM" });
+        assertAllowedCall("type", item);
+      }
+      for (const [field, maximum] of [["dwellMs", 15000], ["ms", 30000]] as const) {
+        const value = item[field];
+        if (value != null && (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > maximum)) {
+          throw Object.assign(new Error(`queue[${index}].${field} must be between 0 and ${maximum}`), { code: "INVALID_PARAM" });
+        }
+      }
     }
   } else if (method === "select_and_advance") {
     if (next.dwellMs != null && (typeof next.dwellMs !== "number" || next.dwellMs < 1000 || next.dwellMs > 15000)) {
@@ -368,6 +390,20 @@ export async function handleBrowserToolCall(
     if (!route.lease.acquire(clientId)) {
       throw Object.assign(new Error("Another AI client currently controls this browser. Try again after its lease expires or is released."), { code: "DEVICE_BUSY" });
     }
+    if (method === "action_queue") {
+      // Human typing, per-action dwell, and explicit waits can exceed the normal 30s RPC limit.
+      const executionMs = safeParams.queue.reduce((total: number, item: Record<string, any>) =>
+        total + 3000 + (item.dwellMs ?? 1000)
+        + (item.type === "type" ? item.text.length * 400 : 0)
+        + (item.type === "wait" ? (item.ms ?? 1000) : 0), 0);
+      const timeoutMs = 30_000 + executionMs + (safeParams.timeoutMs ?? 10_000);
+      const keepLease = setInterval(() => route.lease.acquire(clientId), 10_000);
+      try {
+        return await route.bridge.call(method, safeParams, timeoutMs);
+      } finally {
+        clearInterval(keepLease);
+      }
+    }
     return route.bridge.call(method, safeParams);
   };
 
@@ -417,7 +453,10 @@ export async function handleBrowserToolCall(
       case "browser_type_element": return textResult(await mutate("type_element", args));
       case "browser_wait_for": return textResult(await route.bridge.call("wait_for", args));
       case "browser_select_and_advance": return textResult(await mutate("select_and_advance", args));
-      case "browser_action_queue": return textResult(await mutate("action_queue", args));
+      case "browser_action_queue": {
+        const result = await mutate("action_queue", args);
+        return { ...textResult(result), ...(result.success === false ? { isError: true } : {}) };
+      }
       case "browser_release_control":
         route.lease.release(clientId);
         return textResult({ success: true });

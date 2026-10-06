@@ -97,6 +97,26 @@ A connected agent can:
 
 Coordinates use a normalized `0-1000` space, so the agent can reason against screenshots without depending on a particular display resolution.
 
+### Queue known actions in one call
+
+Use `browser_snapshot` to inspect the page, then prefer `browser_action_queue` when several next actions are already known. A queue executes sequentially and returns a fresh snapshot at the end:
+
+```json
+{
+  "queue": [
+    { "type": "type", "target": { "text": "Email" }, "text": "ada@example.com" },
+    { "type": "type", "target": { "selector": "#name" }, "text": "Ada" },
+    { "type": "click", "target": { "text": "Next" } }
+  ],
+  "waitText": ["Thank you"],
+  "timeoutMs": 10000
+}
+```
+
+Supported action types are `click`, `type`, `scroll`, and `wait`. Click/type targets accept a snapshot `ref`, CSS `selector`, or `text`; for typing, target text matches the field's placeholder or label. Selectors or text are preferable when earlier actions change element order, because numeric refs can shift. Scroll positions use normalized `x`/`y` (default: 500/500), and scroll deltas are CSS pixels.
+
+Batch up to the point where new page information is needed. `timeoutMs` controls the final transition wait; the RPC budget separately accounts for human typing, dwell times, and explicit waits. Failed actions stop the queue and return `completedActions`, prior results, and a zero-based `failedActionIndex`, so an agent can inspect the page before continuing. A failed transition wait also reports failure.
+
 ## Two connection modes
 
 ### Local mode

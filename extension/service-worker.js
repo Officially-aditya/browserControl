@@ -1386,54 +1386,83 @@ async function selectAndAdvance(params = {}) {
 async function executeActionQueue(params = {}) {
   const queue = Array.isArray(params.queue) ? params.queue : [];
   if (queue.length === 0) throw new Error("queue must be a non-empty array of actions");
+  for (const [i, item] of queue.entries()) {
+    if (!item || typeof item !== "object" || !["click", "type", "scroll", "wait"].includes(item.type || "click")) {
+      throw new Error(`Unsupported queue action type at index ${i}: ${item?.type}`);
+    }
+  }
 
   const results = [];
   for (let i = 0; i < queue.length; i++) {
     const item = queue[i];
     const type = item.type || "click";
 
-    if (type === "click") {
-      const clickRes = await clickElement(item.target || item);
-      results.push({ action: "click", result: clickRes });
-    } else if (type === "type") {
-      const typeRes = await typeElement({
-        ...(item.target || {}),
-        text: item.text,
-      });
-      results.push({ action: "type", result: typeRes });
-    } else if (type === "scroll") {
-      const chunks = scrollChunks(item.deltaX || 0, item.deltaY || 0);
-      for (const c of chunks) {
-        await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: item.x || 500, y: item.y || 500, deltaX: c.dx, deltaY: c.dy });
-        await sleep(scrollStepDelayMs());
+    try {
+      if (type === "click") {
+        const clickRes = await clickElement(item.target || item);
+        results.push({ action: "click", result: clickRes });
+      } else if (type === "type") {
+        const typeRes = await typeElement({
+          ...(item.target || {}),
+          queryText: item.target?.text,
+          text: item.text,
+        });
+        results.push({ action: "type", result: typeRes });
+      } else if (type === "scroll") {
+        const deltaX = item.deltaX ?? 0;
+        const deltaY = item.deltaY ?? 0;
+        if (![deltaX, deltaY].every(Number.isFinite) || Math.abs(deltaX) > 4000 || Math.abs(deltaY) > 4000) {
+          throw new Error("scroll deltas must be finite numbers within ±4000");
+        }
+        const vp = await viewport();
+        const p = normalizedPointToSource(item.x ?? 500, item.y ?? 500, {
+          sourceRegion: { x: 0, y: 0, width: vp.width, height: vp.height },
+        });
+        const chunks = scrollChunks(deltaX, deltaY);
+        for (const c of chunks) {
+          await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: c.dx, deltaY: c.dy });
+          await sleep(scrollStepDelayMs());
+        }
+        setPointerFromViewport(p.x, p.y, vp.width, vp.height, "agent");
+        invalidateVisualState("agent-scroll");
+        results.push({ action: "scroll" });
+      } else if (type === "wait") {
+        const ms = item.ms ?? 1000;
+        await sleep(ms);
+        results.push({ action: "wait", ms });
       }
-      results.push({ action: "scroll" });
-    } else if (type === "wait") {
-      await sleep(item.ms || 1000);
-      results.push({ action: "wait", ms: item.ms });
-    }
 
-    // Natural inter-action dwell time between items (reading next row/question)
-    const dwell = item.dwellMs !== undefined ? Number(item.dwellMs) : (i < queue.length - 1 ? randomBetween(450, 950) : 0);
-    if (dwell > 0) {
-      await sleep(dwell + randomBetween(-100, 100));
+      // Natural inter-action dwell time between items (reading next row/question)
+      const dwell = item.dwellMs !== undefined ? Number(item.dwellMs) : (i < queue.length - 1 ? randomBetween(450, 950) : 0);
+      if (dwell > 0) await sleep(Math.max(0, dwell + randomBetween(-100, 100)));
+    } catch (error) {
+      return {
+        success: false,
+        visualEpoch,
+        completedActions: results.length,
+        failedActionIndex: i,
+        errorCode: error?.code || "QUEUE_ACTION_FAILED",
+        message: error?.message || String(error),
+        results,
+      };
     }
   }
 
-  // Wait for transition if specified or if last action was submit/advance
+  let waitResult = null;
   if (Array.isArray(params.waitText) && params.waitText.length > 0) {
-    await waitFor({ text: params.waitText, timeoutMs: params.timeoutMs || 10000 });
+    waitResult = await waitFor({ text: params.waitText, timeoutMs: params.timeoutMs ?? 10000 });
   } else if (params.waitForIdle !== false) {
-    await waitFor({ idle: true, timeoutMs: params.timeoutMs || 5000 });
+    waitResult = await waitFor({ idle: true, timeoutMs: params.timeoutMs ?? 5000 });
   }
 
   await sleep(100);
   const snap = await snapshot();
   return {
-    success: true,
+    success: waitResult?.success !== false,
     visualEpoch,
     completedActions: results.length,
     results,
+    waitResult,
     ...snap,
   };
 }
@@ -1657,7 +1686,16 @@ async function handleRpc(request, source = "remote") {
     case "type_element": return typeElement(request.params || {});
     case "wait_for": return waitFor(request.params || {});
     case "select_and_advance": return selectAndAdvance(request.params || {});
-    case "action_queue": return executeActionQueue(request.params || {});
+    case "action_queue": {
+      const keepLease = setInterval(() => {
+        if (transportLeaseOwner === source) transportLeaseExpiresAt = Date.now() + TRANSPORT_LEASE_MS;
+      }, 10_000);
+      try {
+        return await executeActionQueue(request.params || {});
+      } finally {
+        clearInterval(keepLease);
+      }
+    }
     case "reload_extension": setTimeout(() => chrome.runtime.reload(), 50); return { success: true };
     default: throw new Error(`Unknown RPC method: ${request.method}`);
   }

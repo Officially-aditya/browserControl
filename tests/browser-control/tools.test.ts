@@ -49,6 +49,64 @@ describe("canonical browserControl tools", () => {
     ]);
   });
 
+  it("gives queued typing and dwell times enough RPC time to finish", async () => {
+    const route = fakeRoute();
+    const args = {
+      queue: [
+        { type: "type", target: { ref: 1 }, text: "a".repeat(200), dwellMs: 15000 },
+        { type: "wait", ms: 15000 },
+      ],
+      timeoutMs: 10000,
+    };
+    await handleBrowserToolCall(route, "client-a", "browser_action_queue", args);
+    const [method, params, timeoutMs] = (route.bridge.call as any).mock.calls[0];
+    expect(method).toBe("action_queue");
+    expect(params).toEqual(args);
+    expect(timeoutMs).toBeGreaterThan(120000);
+  });
+
+  it("keeps other clients blocked while a queue runs beyond the lease TTL", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: any) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    const route = fakeRoute(() => pending);
+    const running = handleBrowserToolCall(route, "client-a", "browser_action_queue", {
+      queue: [{ type: "wait", ms: 30000 }, { type: "wait", ms: 30000 }],
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(65000);
+      const blocked = await handleBrowserToolCall(route, "client-b", "browser_click_element", { ref: 1 });
+      expect(blocked.isError).toBe(true);
+      expect(JSON.parse(blocked.content[0].text).errorCode).toBe("DEVICE_BUSY");
+      expect((route.bridge.call as any).mock.calls).toHaveLength(1);
+    } finally {
+      finish({ success: true });
+      await running;
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects invalid queue items before sending any actions to the extension", async () => {
+    const route = fakeRoute();
+    const result = await handleBrowserToolCall(route, "client-a", "browser_action_queue", {
+      queue: [{ type: "click", target: { ref: 1 } }, { type: "type", target: { ref: 2 } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).errorCode).toBe("INVALID_PARAM");
+    expect(route.bridge.call).not.toHaveBeenCalled();
+  });
+
+  it("marks a failed queue result as an MCP tool error and preserves partial progress", async () => {
+    const partial = { success: false, completedActions: 2, failedActionIndex: 2 };
+    const route = fakeRoute(() => partial);
+    const result = await handleBrowserToolCall(route, "client-a", "browser_action_queue", {
+      queue: [{ type: "click", target: { ref: 1 } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toEqual(partial);
+  });
+
   it("returns screenshots as MCP image content", async () => {
     const route = fakeRoute((method) => {
       expect(method).toBe("observe");
