@@ -38,7 +38,8 @@ export function shortcutHoldMs() {
 // ── Mouse: Bézier path generation ───────────────────────────────────────────
 
 /**
- * Generate a cubic Bézier path from `start` to `end`.
+ * Generate an organic, human-like Bézier path from `start` to `end`.
+ * Mimics human arm/wrist pivot arcs, asymmetrical curvature, and Fitts' law deceleration.
  * Returns an array of {x, y} points including start and end.
  */
 export function bezierPath(start, end) {
@@ -47,18 +48,26 @@ export function bezierPath(start, end) {
   const dist = Math.hypot(dx, dy);
   if (dist < 5) return [start, end];
 
-  const steps = Math.min(25, Math.max(8, Math.floor(dist / 30)));
+  // Step count scales with distance: 10 to 30 steps
+  const steps = Math.min(30, Math.max(10, Math.floor(dist / 25)));
   const perpX = dist > 0 ? -dy / dist : 0;
   const perpY = dist > 0 ? dx / dist : 0;
 
-  // Two random control points offset perpendicular to the straight line
+  // Decide arc curvature direction: right-handed human wrist pivot arcs naturally
+  // Bias curve direction based on movement quadrant with natural randomness
+  const arcBias = (dx * dy >= 0 ? 1 : -1) * (Math.random() < 0.8 ? 1 : -1);
+  const curvatureMagnitude = (0.15 + Math.random() * 0.25) * dist * arcBias;
+
+  // Two control points creating an asymmetric, organic curve (Fitts' Law trajectory)
+  const t1 = 0.2 + Math.random() * 0.15;
+  const t2 = 0.65 + Math.random() * 0.15;
   const cp1 = {
-    x: start.x + dx * (0.25 + Math.random() * 0.15) + perpX * (Math.random() - 0.5) * dist * 0.3,
-    y: start.y + dy * (0.25 + Math.random() * 0.15) + perpY * (Math.random() - 0.5) * dist * 0.3,
+    x: start.x + dx * t1 + perpX * curvatureMagnitude * (0.8 + Math.random() * 0.4),
+    y: start.y + dy * t1 + perpY * curvatureMagnitude * (0.8 + Math.random() * 0.4),
   };
   const cp2 = {
-    x: start.x + dx * (0.60 + Math.random() * 0.15) + perpX * (Math.random() - 0.5) * dist * 0.2,
-    y: start.y + dy * (0.60 + Math.random() * 0.15) + perpY * (Math.random() - 0.5) * dist * 0.2,
+    x: start.x + dx * t2 + perpX * curvatureMagnitude * (0.4 + Math.random() * 0.4),
+    y: start.y + dy * t2 + perpY * curvatureMagnitude * (0.4 + Math.random() * 0.4),
   };
 
   const path = [];
@@ -71,14 +80,68 @@ export function bezierPath(start, end) {
     });
   }
 
-  // Micro-wobble (hand tremor): strongest mid-path, zero at endpoints
+  // Organic micro-tremor: tiny involuntary hand noise, strongest in mid-flight, zero at ends
   for (let i = 1; i < path.length - 1; i++) {
-    const wobble = Math.sin((i / path.length) * Math.PI) * (Math.random() - 0.5) * Math.min(4, dist * 0.02);
-    path[i].x += Math.round(wobble * perpX);
-    path[i].y += Math.round(wobble * perpY);
+    const envelope = Math.sin((i / path.length) * Math.PI);
+    const wobbleX = envelope * (Math.random() - 0.5) * Math.min(3.5, dist * 0.02);
+    const wobbleY = envelope * (Math.random() - 0.5) * Math.min(3.5, dist * 0.02);
+    path[i].x += Math.round(wobbleX);
+    path[i].y += Math.round(wobbleY);
   }
 
+  // Ensure first and last points are exact
+  path[0] = { x: Math.round(start.x), y: Math.round(start.y) };
+  path[path.length - 1] = { x: Math.round(end.x), y: Math.round(end.y) };
+
   return path;
+}
+
+/**
+ * Calculate a natural human click point on a target element bounding rectangle.
+ * Rather than clicking the exact center (a known bot indicator), humans click
+ * with a realistic 2D Gaussian distribution across the inner safe area of the element.
+ */
+export function humanClickPoint(rect) {
+  const w = rect.width || 10;
+  const h = rect.height || 10;
+  const left = rect.left !== undefined ? rect.left : (rect.x - w / 2);
+  const top = rect.top !== undefined ? rect.top : (rect.y - h / 2);
+
+  // Safe inner margin (at least 3px, or 10% of dimension)
+  const marginX = Math.min(12, Math.max(3, w * 0.12));
+  const marginY = Math.min(8, Math.max(3, h * 0.15));
+
+  const safeW = Math.max(2, w - 2 * marginX);
+  const safeH = Math.max(2, h - 2 * marginY);
+
+  // Horizontal: For wider buttons or text labels, people tend to click slightly left of center
+  // (where reading starts) with a natural standard deviation
+  const horizontalBias = w > 80 ? 0.42 : 0.5;
+  const targetRelX = gaussianRandom(safeW * horizontalBias, safeW * 0.18);
+  const clampedX = Math.max(0, Math.min(safeW, targetRelX));
+
+  // Vertical: Centered with Gaussian distribution
+  const targetRelY = gaussianRandom(safeH * 0.5, safeH * 0.2);
+  const clampedY = Math.max(0, Math.min(safeH, targetRelY));
+
+  return {
+    x: Math.round(left + marginX + clampedX),
+    y: Math.round(top + marginY + clampedY),
+  };
+}
+
+/**
+ * Return a natural human resting point within the viewport.
+ * Used when initial mouse position is unknown, so cursor never unnaturally sweeps from (0,0).
+ */
+export function naturalRestingPoint(viewportWidth, viewportHeight) {
+  const vw = viewportWidth || 1280;
+  const vh = viewportHeight || 720;
+  // Natural resting area: central 50% horizontally, middle-to-lower 50% vertically
+  return {
+    x: Math.round(vw * randomBetween(0.28, 0.72)),
+    y: Math.round(vh * randomBetween(0.38, 0.78)),
+  };
 }
 
 /**

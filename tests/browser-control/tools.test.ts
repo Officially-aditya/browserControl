@@ -44,6 +44,7 @@ describe("canonical browserControl tools", () => {
       "browser_type_element",
       "browser_wait_for",
       "browser_select_and_advance",
+      "browser_action_queue",
       "browser_release_control",
     ]);
   });

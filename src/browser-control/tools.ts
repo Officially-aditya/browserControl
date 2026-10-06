@@ -245,6 +245,49 @@ export function browserTools(): Tool[] {
         additionalProperties: false,
       },
     },
+    {
+      name: "browser_action_queue",
+      description: "Batch/Queue execution: perform a sequential series of actions (clicks, typing, scrolls, waits) on the current page in a single turn without multi-turn LLM latency. Cursor moves organically between targets with natural dwell times, clicks with Gaussian distribution, and returns a fresh DOM snapshot of the next page upon transition.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          queue: {
+            type: "array",
+            description: "List of actions to execute in sequence",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["click", "type", "scroll", "wait"], default: "click" },
+                target: {
+                  type: "object",
+                  properties: {
+                    ref: { type: "number", minimum: 1 },
+                    selector: { type: "string", maxLength: 1000 },
+                    text: { type: "string", maxLength: 200 },
+                  },
+                  additionalProperties: false,
+                },
+                text: { type: "string", maxLength: 5000, description: "Text to type (for type action)" },
+                dwellMs: { type: "number", minimum: 0, maximum: 15000, description: "Dwell time after this action in ms" },
+                deltaX: { type: "number", description: "Horizontal scroll delta" },
+                deltaY: { type: "number", description: "Vertical scroll delta" },
+                ms: { type: "number", description: "Wait duration in ms" },
+              },
+              additionalProperties: false,
+            },
+          },
+          waitText: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 200 },
+            description: "Text patterns to wait for after the queue finishes",
+          },
+          waitForIdle: { type: "boolean", default: true, description: "Wait for page network/DOM idle after queue" },
+          timeoutMs: { type: "number", minimum: 500, maximum: 30000, default: 10000 },
+        },
+        required: ["queue"],
+        additionalProperties: false,
+      },
+    },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the browserControl device.", inputSchema: EMPTY_SCHEMA },
   ];
 }
@@ -374,6 +417,7 @@ export async function handleBrowserToolCall(
       case "browser_type_element": return textResult(await mutate("type_element", args));
       case "browser_wait_for": return textResult(await route.bridge.call("wait_for", args));
       case "browser_select_and_advance": return textResult(await mutate("select_and_advance", args));
+      case "browser_action_queue": return textResult(await mutate("action_queue", args));
       case "browser_release_control":
         route.lease.release(clientId);
         return textResult({ success: true });

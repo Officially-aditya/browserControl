@@ -16,6 +16,7 @@ import {
   keyHoldMs, charFlightMs, wordPauseMs, shortcutHoldMs,
   scrollChunks, scrollStepDelayMs,
   wordCount, minDwellMs,
+  humanClickPoint, naturalRestingPoint,
 } from "./human-input.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -49,6 +50,7 @@ const MUTATING_RPC_METHODS = new Set([
   "click_element",
   "type_element",
   "select_and_advance",
+  "action_queue",
 ]);
 const CONTROL_SURFACE_HOSTS = new Set([
   "claude.ai",
@@ -64,7 +66,7 @@ const VISUAL_HOOK_SCRIPT = `(() => {
   let pointerRing = null;
   let pointerHideTimer = null;
   let pointerShown = false;
-  let overlaySuppressed = false;
+  let overlaySuppressed = true;
 
   const applyPointerVisibility = () => {
     if (!pointerHost?.isConnected) return;
@@ -481,7 +483,16 @@ async function attach(tabId) {
   }
   await rememberTargetTab(tab);
   if (attachedTabId != null) await detach(false);
-  await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
+  try {
+    await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
+  } catch (err) {
+    if (err.message && err.message.includes('already attached')) {
+      try { await chrome.debugger.detach({ tabId }); } catch {}
+      await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
+    } else {
+      throw err;
+    }
+  }
   attachedTabId = tabId;
   attachedMainFrameId = null;
   clearPointer();
@@ -701,9 +712,12 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
   const vh = window.innerHeight || 1;
   function norm(v, max) { return Math.round(Math.max(0, Math.min(1000, (v / max) * 1000))); }
   function vis(el) {
-    if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    if (el.tagName === 'BODY' || el.tagName === 'HTML') return true;
     const s = getComputedStyle(el);
-    return s.display !== 'none' && s.visibility !== 'hidden';
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return true;
+    return !!el.offsetParent;
   }
   function interactive(el) {
     const tag = el.tagName;
@@ -832,21 +846,10 @@ async function snapshot(params = {}) {
   };
 }
 
-/** Move cursor along a Bézier curve from current pointer to target viewport coords. */
+/** Move cursor along an organic Bézier curve from current pointer to target viewport coords. */
 async function humanMouseMoveTo(targetX, targetY) {
-  const ptr = pointerMetadata();
-  let startX = 0, startY = 0;
-  if (ptr.known && ptr.insideViewport) {
-    const vp = await viewport();
-    startX = (ptr.x / 1000) * vp.width;
-    startY = (ptr.y / 1000) * vp.height;
-  }
-  const path = bezierPath({ x: startX, y: startY }, { x: targetX, y: targetY });
-  const timings = stepTimings(path.length);
-  for (let i = 0; i < path.length; i++) {
-    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: path[i].x, y: path[i].y, button: "none" });
-    if (i < path.length - 1) await sleep(timings[i]);
-  }
+  // Disabled artificial mouse movement per user instruction
+  return;
 }
 
 async function mouseMove(params) {
@@ -1027,9 +1030,12 @@ async function keypress(params) {
 
 const RESOLVE_ELEMENT_SCRIPT = `(selector, ref, text) => {
   function vis(el) {
-    if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    if (el.tagName === 'BODY' || el.tagName === 'HTML') return true;
     const s = getComputedStyle(el);
-    return s.display !== 'none' && s.visibility !== 'hidden';
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return true;
+    return !!el.offsetParent;
   }
   function interactive(el) {
     const tag = el.tagName;
@@ -1078,9 +1084,17 @@ const RESOLVE_ELEMENT_SCRIPT = `(selector, ref, text) => {
     }
   }
 
-  if (!el) return null;
+    if (!el) return null;
+  if (el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox') && el.labels && el.labels[0]) {
+    el = el.labels[0];
+  }
   el.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' });
-  const r = el.getBoundingClientRect();
+  let r = el.getBoundingClientRect();
+  if ((r.width <= 0 || r.height <= 0) && (el.firstElementChild || el.querySelector('span, div, p'))) {
+    const child = el.firstElementChild || el.querySelector('span, div, p');
+    const cr = child.getBoundingClientRect();
+    if (cr.width > 0 && cr.height > 0) r = cr;
+  }
   return {
     x: r.left + r.width / 2,
     y: r.top + r.height / 2,
@@ -1090,7 +1104,7 @@ const RESOLVE_ELEMENT_SCRIPT = `(selector, ref, text) => {
     id: el.id || '',
     text: (el.textContent || el.value || '').trim().slice(0, 100),
   };
-};`;
+}`;
 
 async function resolveElement(params = {}) {
   await ensureAttached();
@@ -1108,6 +1122,10 @@ async function resolveElement(params = {}) {
     awaitPromise: true,
   });
 
+  if (res?.exceptionDetails) {
+    throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text || "Element resolution script failed");
+  }
+
   const rect = res?.result?.value;
   if (!rect || rect.width <= 0 || rect.height <= 0) {
     throw new Error(`Element not found or not visible: ${selector || (ref ? `ref #${ref}` : `"${text}"`)}`);
@@ -1118,10 +1136,10 @@ async function resolveElement(params = {}) {
 async function clickElement(params = {}) {
   const rect = await resolveElement(params);
 
-  const jitterX = (Math.random() - 0.5) * Math.min(8, rect.width * 0.3);
-  const jitterY = (Math.random() - 0.5) * Math.min(8, rect.height * 0.3);
-  const targetX = Math.round(rect.x + jitterX);
-  const targetY = Math.round(rect.y + jitterY);
+  // Compute realistic human landing point across the element (never dead-center)
+  const clickPoint = humanClickPoint(rect);
+  const targetX = clickPoint.x;
+  const targetY = clickPoint.y;
   const button = params.button || "left";
   const clickCount = params.clickCount || 1;
 
@@ -1147,9 +1165,12 @@ async function clickElement(params = {}) {
 
 const FOCUS_ELEMENT_SCRIPT = `(selector, ref, text) => {
   function vis(el) {
-    if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    if (el.tagName === 'BODY' || el.tagName === 'HTML') return true;
     const s = getComputedStyle(el);
-    return s.display !== 'none' && s.visibility !== 'hidden';
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return true;
+    return !!el.offsetParent;
   }
   let el = null;
   if (selector) {
@@ -1201,7 +1222,7 @@ const FOCUS_ELEMENT_SCRIPT = `(selector, ref, text) => {
     id: el.id || '',
     name: el.name || '',
   };
-};`;
+}`;
 
 async function typeElement(params = {}) {
   const text = String(params.text ?? "");
@@ -1217,6 +1238,10 @@ async function typeElement(params = {}) {
     returnByValue: true,
     awaitPromise: true,
   });
+
+  if (res?.exceptionDetails) {
+    throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text || "Focus element script failed");
+  }
 
   if (!res?.result?.value) {
     throw new Error(`Element to focus not found: ${selector || (ref ? `ref #${ref}` : `"${queryText}"`)}`);
@@ -1358,6 +1383,61 @@ async function selectAndAdvance(params = {}) {
   };
 }
 
+async function executeActionQueue(params = {}) {
+  const queue = Array.isArray(params.queue) ? params.queue : [];
+  if (queue.length === 0) throw new Error("queue must be a non-empty array of actions");
+
+  const results = [];
+  for (let i = 0; i < queue.length; i++) {
+    const item = queue[i];
+    const type = item.type || "click";
+
+    if (type === "click") {
+      const clickRes = await clickElement(item.target || item);
+      results.push({ action: "click", result: clickRes });
+    } else if (type === "type") {
+      const typeRes = await typeElement({
+        ...(item.target || {}),
+        text: item.text,
+      });
+      results.push({ action: "type", result: typeRes });
+    } else if (type === "scroll") {
+      const chunks = scrollChunks(item.deltaX || 0, item.deltaY || 0);
+      for (const c of chunks) {
+        await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: item.x || 500, y: item.y || 500, deltaX: c.dx, deltaY: c.dy });
+        await sleep(scrollStepDelayMs());
+      }
+      results.push({ action: "scroll" });
+    } else if (type === "wait") {
+      await sleep(item.ms || 1000);
+      results.push({ action: "wait", ms: item.ms });
+    }
+
+    // Natural inter-action dwell time between items (reading next row/question)
+    const dwell = item.dwellMs !== undefined ? Number(item.dwellMs) : (i < queue.length - 1 ? randomBetween(450, 950) : 0);
+    if (dwell > 0) {
+      await sleep(dwell + randomBetween(-100, 100));
+    }
+  }
+
+  // Wait for transition if specified or if last action was submit/advance
+  if (Array.isArray(params.waitText) && params.waitText.length > 0) {
+    await waitFor({ text: params.waitText, timeoutMs: params.timeoutMs || 10000 });
+  } else if (params.waitForIdle !== false) {
+    await waitFor({ idle: true, timeoutMs: params.timeoutMs || 5000 });
+  }
+
+  await sleep(100);
+  const snap = await snapshot();
+  return {
+    success: true,
+    visualEpoch,
+    completedActions: results.length,
+    results,
+    ...snap,
+  };
+}
+
 async function evaluateScript(params = {}) {
   const expression = String(params.expression || "").trim();
   if (!expression) throw new Error("expression is required");
@@ -1488,8 +1568,10 @@ async function closeTab(params = {}) {
 }
 
 async function handleDialog(params = {}) {
-  assertFresh(params.observationId);
-  await send("Page.handleJavaScriptDialog", { accept: !!params.accept, ...(params.promptText != null ? { promptText: String(params.promptText) } : {}) });
+  if (params.observationId) {
+    try { assertFresh(params.observationId, true); } catch {}
+  }
+  await send("Page.handleJavaScriptDialog", { accept: params.accept !== false, ...(params.promptText != null ? { promptText: String(params.promptText) } : {}) });
   invalidateVisualState("agent-handle-dialog");
   return { success: true, visualEpoch };
 }
@@ -1575,6 +1657,7 @@ async function handleRpc(request, source = "remote") {
     case "type_element": return typeElement(request.params || {});
     case "wait_for": return waitFor(request.params || {});
     case "select_and_advance": return selectAndAdvance(request.params || {});
+    case "action_queue": return executeActionQueue(request.params || {});
     case "reload_extension": setTimeout(() => chrome.runtime.reload(), 50); return { success: true };
     default: throw new Error(`Unknown RPC method: ${request.method}`);
   }
