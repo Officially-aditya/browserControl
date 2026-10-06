@@ -126,6 +126,7 @@ async function refresh() {
   $("connect").textContent = enrolled ? "Reconnect remote access" : "Enable remote access";
   $("connect").dataset.defaultLabel = $("connect").textContent;
   $("probeLocal").dataset.defaultLabel = "Check local connection";
+  $("disconnectLocal").disabled = !localConnected;
   $("reviewApproval").dataset.defaultLabel = "Review";
   $("pause").textContent = paused ? "Resume" : "Pause";
   $("pause").disabled = !anyConnected && !paused;
@@ -186,6 +187,23 @@ $("probeLocal").addEventListener("click", async () => {
     setError(error?.message || String(error));
   } finally {
     setBusy(button, false, "Checking…");
+    await refresh();
+  }
+});
+
+$("disconnectLocal").dataset.defaultLabel = $("disconnectLocal").textContent;
+$("disconnectLocal").addEventListener("click", async () => {
+  const button = $("disconnectLocal");
+  setError();
+  setBusy(button, true, "Disconnecting…");
+  try {
+    const result = await call({ type: "disconnectLocal" });
+    if (!result?.ok) throw new Error(result?.error || "Could not disconnect the local agent");
+    setError("Local agent disconnected. Start another agent to connect to browserControl.");
+  } catch (error) {
+    setError(error?.message || String(error));
+  } finally {
+    setBusy(button, false, "Disconnecting…");
     await refresh();
   }
 });

@@ -2020,6 +2020,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await localConnection?.connect();
       return { ok: true, localConnected };
     }
+    if (message.type === "disconnectLocal") {
+      if (!localConnection) throw new Error("No local agent is connected");
+      await localConnection.disconnect();
+      if (transportLeaseOwner === "local") {
+        transportLeaseOwner = null;
+        transportLeaseExpiresAt = 0;
+      }
+      await chrome.alarms.clear(CONTROL_SESSION_ALARM);
+      await detach(false);
+      await setStatus(anyTransportConnected() ? "connected" : "disconnected");
+      return { ok: true };
+    }
     if (message.type === "getOAuthCredential") {
       const senderUrl = String(sender?.url || "");
       if (!senderUrl.startsWith(`${PRODUCTION_HTTP_ORIGIN}/authorize`) && !senderUrl.startsWith(`${PRODUCTION_HTTP_ORIGIN}/oauth/authorize`)) {

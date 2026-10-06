@@ -11,6 +11,7 @@ export function createLocalConnection({ handleRpc, onStateChange }) {
   let retryTimer = null;
   let retryAttempt = 0;
   let stopped = false;
+  let pendingDisconnect = null;
 
   const extensionId = chrome.runtime.id;
 
@@ -81,7 +82,7 @@ export function createLocalConnection({ handleRpc, onStateChange }) {
           return;
         }
 
-        if (!request?.id || !request?.method) return;
+        if (pendingDisconnect || !request?.id || !request?.method) return;
         try {
           const result = await handleRpc(request, "local");
           if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
@@ -101,10 +102,17 @@ export function createLocalConnection({ handleRpc, onStateChange }) {
         }
       };
 
-      currentSocket.onclose = () => {
+      currentSocket.onclose = (event) => {
         if (socket !== currentSocket) return;
         socket = null;
         notify(false);
+        if (pendingDisconnect) {
+          const pending = pendingDisconnect;
+          pendingDisconnect = null;
+          clearTimeout(pending.timer);
+          if (event.code === 4000) pending.resolve();
+          else pending.reject(new Error("Local connection closed before the agent confirmed disconnect"));
+        }
         scheduleRetry();
       };
 
@@ -132,6 +140,24 @@ export function createLocalConnection({ handleRpc, onStateChange }) {
       return socket?.readyState === WebSocket.OPEN;
     },
     connect,
+    disconnect() {
+      if (pendingDisconnect) return Promise.reject(new Error("Local agent disconnect is already in progress"));
+      if (socket?.readyState !== WebSocket.OPEN) return Promise.reject(new Error("No local agent is connected"));
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingDisconnect = null;
+          reject(new Error("Local agent did not confirm disconnect. Update or restart its browserControl process."));
+        }, 5_000);
+        pendingDisconnect = { resolve, reject, timer };
+        try {
+          socket.send(JSON.stringify({ type: "disconnect" }));
+        } catch (error) {
+          clearTimeout(timer);
+          pendingDisconnect = null;
+          reject(error);
+        }
+      });
+    },
     stop() {
       stopped = true;
       clearRetry();

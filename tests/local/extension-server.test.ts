@@ -1,11 +1,12 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { startLocalExtensionServer, type LocalExtensionServer } from "../../src/local/extension-server.js";
 
 const EXTENSION_ID = "abcdefghijklmnopabcdefghijklmnop";
 const ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 
-async function openSocket(server: LocalExtensionServer): Promise<WebSocket> {
+async function openSocket(server: Pick<LocalExtensionServer, "port">): Promise<WebSocket> {
   const handshake = await fetch(`http://127.0.0.1:${server.port}/handshake`, {
     method: "POST",
     headers: {
@@ -66,6 +67,79 @@ describe("local extension server", () => {
       transport: "local",
     });
     socket.close();
+  });
+
+  it("disconnects pending RPCs and frees the port for a new agent", async () => {
+    const onDisconnect = vi.fn();
+    const server = await startLocalExtensionServer({ port: 0, onDisconnect });
+    servers.push(server);
+    const socket = await openSocket(server);
+    const pending = expect(server.bridge.call("observe", {}, 2_000)).rejects.toThrow(/Disconnected by user/);
+    const closed = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)));
+
+    socket.send(JSON.stringify({ type: "disconnect" }));
+    expect(await closed).toBe(4000);
+    await pending;
+    await server.close();
+    await vi.waitFor(() => expect(onDisconnect).toHaveBeenCalledOnce());
+    expect(server.bridge.connected).toBe(false);
+
+    const next = await startLocalExtensionServer({ port: server.port });
+    servers.push(next);
+    const nextSocket = await openSocket(next);
+    expect(next.bridge.connected).toBe(true);
+    nextSocket.close();
+  });
+
+  it("keeps the listening port when the extension closes normally", async () => {
+    const onDisconnect = vi.fn();
+    const server = await startLocalExtensionServer({ port: 0, onDisconnect });
+    servers.push(server);
+    const socket = await openSocket(server);
+    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    socket.close();
+    await closed;
+    expect(onDisconnect).not.toHaveBeenCalled();
+    expect((await fetch(`http://127.0.0.1:${server.port}/health`)).status).toBe(200);
+  });
+
+  it("exits the local MCP process on disconnect and lets another process use its port", async () => {
+    const reservation = await startLocalExtensionServer({ port: 0 });
+    const port = reservation.port;
+    await reservation.close();
+    const child = spawn(process.execPath, ["--import", "tsx", "src/local/runtime.ts"], {
+      env: { ...process.env, BROWSERCONTROL_LOCAL_PORT: String(port) },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Local MCP did not start")), 5_000);
+        let stderr = "";
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+          if (stderr.includes("Local extension bridge listening")) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.once("error", (error) => { clearTimeout(timer); reject(error); });
+        child.once("exit", (code) => {
+          clearTimeout(timer);
+          reject(new Error(`Local MCP exited before ready (${code}): ${stderr}`));
+        });
+      });
+      const socket = await openSocket({ port });
+      socket.send(JSON.stringify({ type: "disconnect" }));
+      expect(await exited).toBe(0);
+      const next = await startLocalExtensionServer({ port });
+      servers.push(next);
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        await exited;
+      }
+    }
   });
 
   it("makes handshake challenges single use", async () => {

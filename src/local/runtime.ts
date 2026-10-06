@@ -16,14 +16,21 @@ function localPortFromEnvironment(): number {
 }
 
 export async function runLocalBrowserControl(): Promise<void> {
-  const local = await startLocalExtensionServer({ port: localPortFromEnvironment() });
+  let server: ReturnType<typeof createBrowserControlMcpServer> | undefined;
+  const local = await startLocalExtensionServer({
+    port: localPortFromEnvironment(),
+    onDisconnect: async () => {
+      await server?.close();
+      process.exit(0);
+    },
+  });
   const route: BrowserRoute = {
     deviceId: "local",
     bridge: local.bridge,
     lease: new ControlLease(60_000),
   };
   const clientId = `local-stdio:${process.pid}`;
-  const server = createBrowserControlMcpServer(route, clientId, {
+  server = createBrowserControlMcpServer(route, clientId, {
     name: "browser-control-local",
     version: "0.7.0",
   });

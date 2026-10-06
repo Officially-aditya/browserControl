@@ -23,6 +23,7 @@ export interface LocalExtensionServerOptions {
   host?: string;
   port?: number;
   bridge?: ExtensionBridge;
+  onDisconnect?: () => void | Promise<void>;
 }
 
 export interface LocalExtensionServer {
@@ -201,6 +202,14 @@ export async function startLocalExtensionServer(
     keepAlive.unref?.();
 
     socket.once("close", () => clearInterval(keepAlive));
+    socket.on("message", (raw) => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message?.type !== "disconnect") return;
+      void close(4000, "Disconnected by user")
+        .then(() => options.onDisconnect?.())
+        .catch((error) => console.error("[browserControl] Local disconnect failed:", error));
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -223,17 +232,24 @@ export async function startLocalExtensionServer(
     throw new Error("Could not resolve browserControl local bridge address");
   }
 
+  let closePromise: Promise<void> | null = null;
+  function close(code = 1001, reason = "browserControl local process stopped"): Promise<void> {
+    if (closePromise) return closePromise;
+    // Stop listening before acknowledging disconnect, so the next agent can bind this port.
+    closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+    challenges.clear();
+    bridge.disconnect(code, reason);
+    for (const client of webSocketServer.clients) {
+      try { client.close(code, reason); } catch { client.terminate(); }
+    }
+    webSocketServer.close();
+    return closePromise;
+  }
+
   return {
     host,
     port: address.port,
     bridge,
-    close: async () => {
-      bridge.disconnect(1001, "browserControl local process stopped");
-      for (const client of webSocketServer.clients) {
-        try { client.close(1001, "browserControl local process stopped"); } catch { client.terminate(); }
-      }
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      webSocketServer.close();
-    },
+    close: () => close(),
   };
 }

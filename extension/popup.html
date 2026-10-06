@@ -15,7 +15,8 @@
   <div class="section">
     <div class="mode"><strong>Local agents</strong><span id="localState" class="pill">Checking</span></div>
     <div class="muted">Run browserControl locally from OpenCode, Codex, Claude Code, or another stdio MCP client. Browser traffic goes directly between the local process and this extension.</div>
-    <button id="probeLocal" style="width:100%;margin-top:9px">Check local connection</button>
+    <div class="row"><button id="probeLocal" class="grow">Check local connection</button><button id="disconnectLocal" class="danger" disabled>Disconnect agent</button></div>
+    <div class="muted">Disconnect stops the local agent connection and frees the port for another agent.</div>
   </div>
 
   <div class="section">

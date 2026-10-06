@@ -138,6 +138,8 @@ existing Chrome
 
 The browserControl process binds its extension bridge to loopback only. The extension discovers it automatically and establishes the local connection.
 
+To switch local agents, open the extension popup and click **Disconnect agent** under **Local agents**. This closes the local MCP process and releases port 8765 so another agent can start. The extension automatically discovers the next local process. Remote access has its own **Disable remote access** button.
+
 In local mode:
 
 - browser screenshots and browser RPCs do not pass through the hosted browserControl relay
