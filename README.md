@@ -99,13 +99,15 @@ Coordinates use a normalized `0-1000` space, so the agent can reason against scr
 
 ### Queue known actions in one call
 
-Use `browser_snapshot` to inspect the page, then prefer `browser_action_queue` when several next actions are already known. A queue executes sequentially and returns a fresh snapshot at the end:
+Take one `browser_snapshot`, prepare the known mouse and keyboard steps, then execute them with `browser_action_queue`. The snapshot identifies `focusedRef` and lists `tabOrder` as element refs, with positive `tabindex` first and ordinary tab stops in document order. Element refs themselves are not tab order. Disabled/inert controls are excluded, and each radio group contributes one tab stop. These are top-document tab stops; custom widgets, frames, and shadow roots may handle focus differently. Establish focus with a click when needed, then batch typing and separate Tab/Shift+Tab or arrow-key actions. A queue executes sequentially and returns a fresh snapshot at the end:
 
 ```json
 {
+  "observationId": "<from browser_snapshot>",
   "queue": [
-    { "type": "type", "target": { "text": "Email" }, "text": "ada@example.com" },
     { "type": "type", "target": { "selector": "#name" }, "text": "Ada" },
+    { "type": "keypress", "keys": ["Tab"] },
+    { "type": "type", "text": "ada@example.com" },
     { "type": "click", "target": { "text": "Next" } }
   ],
   "waitText": ["Thank you"],
@@ -113,9 +115,9 @@ Use `browser_snapshot` to inspect the page, then prefer `browser_action_queue` w
 }
 ```
 
-Supported action types are `click`, `type`, `scroll`, and `wait`. Click/type targets accept a snapshot `ref`, CSS `selector`, or `text`; for typing, target text matches the field's placeholder or label. Selectors or text are preferable when earlier actions change element order, because numeric refs can shift. Scroll positions use normalized `x`/`y` (default: 500/500), and scroll deltas are CSS pixels.
+Supported action types are `click`, `double_click`, `move`, `type`, `keypress`, `scroll`, and `wait`. DOM targets accept a snapshot `ref`, CSS `selector`, or `text`; for typing, target text matches the field's placeholder or label. Selectors or text are preferable when earlier actions change element order, because numeric refs can shift. Coordinate clicks and moves require the queue-level `observationId`. All coordinates use normalized 0–1000 values within that observation's source region, including crops from `browser_inspect`. Scroll positions default to 500/500; without an observation they use the full current viewport. Scroll deltas are CSS pixels. Offscreen elements are marked `[offscreen]` without click coordinates; DOM targeting can scroll them into view.
 
-Batch up to the point where new page information is needed. `timeoutMs` controls the final transition wait; the RPC budget separately accounts for human typing, dwell times, and explicit waits. Failed actions stop the queue and return `completedActions`, prior results, and a zero-based `failedActionIndex`, so an agent can inspect the page before continuing. A failed transition wait also reports failure.
+Batch up to the point where navigation, scrolling, a popup, or a layout change requires new page information; Next/Submit should be the last action. Coordinate targets must stay in place across earlier steps. The observation is checked once at the start, and its mapping is reused without intermediate snapshots. A local context check stops later inputs if the tab navigates, changes, or resizes. `timeoutMs` controls the final transition wait; the RPC budget separately accounts for human typing, dwell times, and explicit waits. Failed actions stop the queue and return `completedActions`, prior results, and a zero-based `failedActionIndex`, so an agent can inspect the page before continuing. A failed transition wait also reports failure.
 
 ## Two connection modes
 

@@ -68,7 +68,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_snapshot",
-      description: "Fast DOM snapshot of the current page. Returns a structured text representation of visible elements with interactive elements annotated with [index] markers and normalized (x,y) coordinates in 0-1000 space. Much faster than browser_observe (no screenshot encoding). Use this as the primary observation tool — fall back to browser_observe only when you need pixel-level visual context (e.g. canvas, images, charts). The returned observationId works with all action tools (click, type, scroll, etc.). When multiple next actions are already known, execute them together with browser_action_queue, which returns the next snapshot.",
+      description: "Take one fast DOM snapshot, then prepare a complete browser_action_queue for the known steps on this page. Interactive elements have [ref] markers and normalized 0-1000 coordinates using the observation's viewport dimensions. Offscreen elements are marked [offscreen] without click coordinates; use a DOM target to scroll them into view. focusedRef identifies the focused element, and tabOrder lists top-document tab stops by ref (positive tabindex first, then document order, excluding disabled/inert controls and other radios in each group). Use this to plan mouse clicks, focused typing, Tab/Shift+Tab and arrow keys; refs themselves are not tab order. Custom widgets, frames and shadow roots may handle focus differently, so establish focus explicitly when needed. Use browser_observe for pixel-level context. Pass the observationId to the planned queue, which returns the next snapshot.",
       inputSchema: {
         type: "object" as const,
         properties: {},
@@ -249,11 +249,11 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_action_queue",
-      description: 'Execute multiple known actions sequentially in ONE tool call. Prefer this over separate click/type/keypress/scroll/wait calls when the next steps are already known, such as filling several fields then clicking Submit, or selecting several options then Next. Supports click, double_click, move, type, keypress, scroll, wait. Works with both DOM targets and mouse/keyboard coordinates. DOM targets: set item.target to ref from browser_snapshot, a CSS selector, or text (visible text for clicks; placeholder/label/aria-label/name for typing); these resolve live, so no observationId is needed. Prefer selectors or text if earlier actions change the DOM; refs can shift. Coordinates: omit target and set x/y (normalized 0-1000) on click/double_click/move, and pass the queue-level observationId from browser_observe/browser_snapshot/browser_inspect that the coordinates came from. That observation must be current when the queue starts. Every coordinate item is mapped through it, so only batch coordinate actions whose targets will not move because of earlier items. type without a target types into the currently focused element (e.g. after a coordinate click); keypress sends shortcuts like ["Enter"] or ["Tab"]. Examples: {"queue":[{"type":"type","target":{"text":"Email"},"text":"ada@example.com"},{"type":"click","target":{"text":"Next"}}]} or {"observationId":"…","queue":[{"type":"click","x":412,"y":230},{"type":"type","text":"hello"},{"type":"keypress","keys":["Enter"]}]}. Batch only until you need new page information. Returns completedActions, per-action results, and a final snapshot; stops on a failed action and reports its zero-based failedActionIndex. Stops with CONTROL_PAUSED if the user pauses control. timeoutMs controls only the final wait, not the whole queue.',
+      description: "Plan from one browser_snapshot/browser_observe/browser_inspect, then execute the known mouse and keyboard steps in ONE call; a fresh snapshot is returned at the end. Supports click, double_click, move, type, keypress, scroll and wait. DOM targets: item.target accepts ref, selector or text; these resolve live and may be used without observationId. Prefer selectors/text if element order changes. Coordinates: pass the observationId they came from and use normalized 0-1000 x/y on click/double_click/move/scroll. Supplied observations are checked once at queue start, and their source region is reused throughout, including inspected crops. Scroll without observationId uses the full current viewport. type without target types into the focused control; use snapshot focusedRef/tabOrder to plan separate keypress actions for Tab, Shift+Tab or arrow keys, establishing focus with a click first when needed. Do not use coordinates for [offscreen] targets. End the batch where navigation, scrolling, a popup or a layout change requires new information; a Next/Submit action should be last. Coordinate targets must stay in place across earlier steps. Example: {\"observationId\":\"…\",\"queue\":[{\"type\":\"click\",\"x\":412,\"y\":230},{\"type\":\"type\",\"text\":\"Ada\"},{\"type\":\"keypress\",\"keys\":[\"Tab\"]},{\"type\":\"type\",\"text\":\"ada@example.com\"}]}. Returns completedActions, per-action results and the next snapshot; failures stop at failedActionIndex (zero-based). Tab/navigation/viewport changes stop later actions with STALE_OBSERVATION; user pause returns CONTROL_PAUSED. Inspect before continuing a failed batch. timeoutMs controls the final wait, not the whole queue.",
       inputSchema: {
         type: "object" as const,
         properties: {
-          observationId: { type: "string", description: "Observation the x/y coordinates come from. Required when any click/double_click/move item uses x/y instead of target." },
+          observationId: { type: "string", description: "Observation used to plan the queue. Required for coordinate click/double_click/move; when supplied, scroll positions use its source region too." },
           queue: {
             type: "array",
             minItems: 1,
@@ -276,8 +276,8 @@ export function browserTools(): Tool[] {
                 keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 }, description: "Keyboard shortcut for keypress, e.g. [\"Enter\"] or [\"Control\",\"A\"]" },
                 button: { type: "string", enum: ["left", "right", "middle"], default: "left", description: "Mouse button for click/double_click" },
                 dwellMs: { type: "number", minimum: 0, maximum: 15000, description: "Dwell time after this action in ms" },
-                x: { type: "number", minimum: 0, maximum: 1000, description: "Normalized x: click/double_click/move point from observationId, or scroll wheel position (default 500)" },
-                y: { type: "number", minimum: 0, maximum: 1000, description: "Normalized y: click/double_click/move point from observationId, or scroll wheel position (default 500)" },
+                x: { type: "number", minimum: 0, maximum: 1000, description: "Normalized x within observationId's source region; scroll defaults to 500 and uses the full viewport if observationId is omitted" },
+                y: { type: "number", minimum: 0, maximum: 1000, description: "Normalized y within observationId's source region; scroll defaults to 500 and uses the full viewport if observationId is omitted" },
                 deltaX: { type: "number", minimum: -4000, maximum: 4000, description: "Horizontal scroll delta in CSS pixels" },
                 deltaY: { type: "number", minimum: -4000, maximum: 4000, description: "Vertical scroll delta in CSS pixels" },
                 ms: { type: "number", minimum: 0, maximum: 30000, default: 1000, description: "Wait duration in ms (for wait action)" },
@@ -290,7 +290,7 @@ export function browserTools(): Tool[] {
             items: { type: "string", minLength: 1, maxLength: 200 },
             description: "Wait until any of these texts appear after all actions. A timeout is reported as a failed queue.",
           },
-          waitForIdle: { type: "boolean", default: true, description: "Wait for page network/DOM idle after queue" },
+          waitForIdle: { type: "boolean", default: true, description: "Wait for recognized busy/loading indicators to disappear after the queue" },
           timeoutMs: { type: "number", minimum: 500, maximum: 30000, default: 10000 },
         },
         required: ["queue"],

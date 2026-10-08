@@ -23,23 +23,28 @@ describe("Coordinate Regression Suite Across Matrix", () => {
     for (const dpr of dprs) {
       for (const zoom of zoomScales) {
         it(`should maintain coordinate accuracy <= 2 CSS px for ${res.w}x${res.h}, DPR ${dpr}, Zoom ${zoom * 100}%`, () => {
-          // Model sees image scaled by zoom or DPR normalized
-          const effectiveViewportW = res.w;
-          const effectiveViewportH = res.h;
+          // Zoom changes CSS viewport size; DPR controls the native image pixel size.
+          const effectiveViewportW = res.w / zoom;
+          const effectiveViewportH = res.h / zoom;
+          const imageWidth = res.w * dpr;
+          const imageHeight = res.h * dpr;
 
           const mapper = CoordinateMapper.create(
             effectiveViewportW,
             effectiveViewportH,
-            effectiveViewportW,
-            effectiveViewportH,
-            dpr
+            imageWidth,
+            imageHeight,
+            dpr,
+            zoom
           );
 
           for (const pt of testGridPoints) {
             const targetX = Math.round(effectiveViewportW * pt.xRatio);
             const targetY = Math.round(effectiveViewportH * pt.yRatio);
 
-            const mapped = mapper.toViewport(targetX, targetY);
+            const imageX = targetX * imageWidth / effectiveViewportW;
+            const imageY = targetY * imageHeight / effectiveViewportH;
+            const mapped = mapper.toViewport(imageX, imageY);
             const deltaX = Math.abs(mapped.x - targetX);
             const deltaY = Math.abs(mapped.y - targetY);
 
@@ -47,7 +52,9 @@ describe("Coordinate Regression Suite Across Matrix", () => {
             expect(deltaY).toBeLessThanOrEqual(2);
 
             // Verify bounds
-            expect(mapper.isInBounds(mapped.x, mapped.y)).toBe(true);
+            expect(mapper.isInBounds(imageX, imageY)).toBe(true);
+            expect(mapper.toImage(mapped.x, mapped.y).x).toBeCloseTo(imageX, 1);
+            expect(mapper.toImage(mapped.x, mapped.y).y).toBeCloseTo(imageY, 1);
           }
         });
       }

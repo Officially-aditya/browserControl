@@ -49,6 +49,7 @@ function queueHarness(overrides = {}, realTyping = false) {
     paused: false,
     FOCUS_ELEMENT_SCRIPT: "focus",
     visualEpoch: 1,
+    controlContextEpoch: 1,
     ...overrides,
   };
   const run = new Function(
@@ -56,9 +57,9 @@ function queueHarness(overrides = {}, realTyping = false) {
     functionSource("normalizedPointToSource") +
       (realTyping ? functionSource("typeElement") : "") +
       functionSource("executeActionQueue") +
-      "; return executeActionQueue;",
+      "; return { run: executeActionQueue, changeContext: () => controlContextEpoch++, changeTab: (id) => attachedTabId = id };",
   )(...Object.values(dependencies));
-  return { run, ...dependencies };
+  return { ...run, ...dependencies };
 }
 
 describe("extension action queue", () => {
@@ -101,8 +102,66 @@ describe("extension action queue", () => {
     expect(h.send).toHaveBeenCalledWith("Input.dispatchMouseEvent", {
       type: "mouseWheel", x: 0, y: 400, deltaX: 0, deltaY: 600,
     });
-    expect(h.setPointerFromViewport).toHaveBeenCalledWith(0, 400, 1400, 800, "agent");
+    expect(h.setPointerFromRecordPoint).toHaveBeenCalledWith({ x: 0, y: 400 }, expect.objectContaining({ viewportWidth: 1400, viewportHeight: 800 }), "agent");
     expect(h.invalidateVisualState).toHaveBeenCalledWith("agent-scroll");
+  });
+
+  it("uses the observation crop for queued scrolling without fetching another viewport", async () => {
+    const record = {
+      tabId: 1,
+      sourceRegion: { x: 700, y: 200, width: 400, height: 200 },
+      viewportWidth: 1400,
+      viewportHeight: 800,
+    };
+    const h = queueHarness({ assertFresh: vi.fn(() => record) });
+    await h.run({
+      observationId: "crop",
+      queue: [{ type: "scroll", x: 500, y: 500, deltaY: 600 }],
+      waitForIdle: false,
+    });
+    expect(h.assertFresh).toHaveBeenCalledOnce();
+    expect(h.send).toHaveBeenCalledWith("Input.dispatchMouseEvent", {
+      type: "mouseWheel", x: 900, y: 300, deltaX: 0, deltaY: 600,
+    });
+    expect(h.setPointerFromRecordPoint).toHaveBeenCalledWith({ x: 900, y: 300 }, record, "agent");
+    expect(h.viewport).not.toHaveBeenCalled();
+  });
+
+  it.each(["changeContext", "changeTab"])("stops later inputs when %s occurs in the same batch", async (change) => {
+    const h = queueHarness();
+    h.dispatchClick.mockImplementation(async () => h[change](2));
+    const result = await h.run({
+      observationId: "obs-1",
+      queue: [
+        { type: "click", x: 500, y: 250, dwellMs: 0 },
+        { type: "keypress", keys: ["Tab"] },
+        { type: "type", text: "must not type on another page" },
+      ],
+      waitForIdle: false,
+    });
+    expect(result).toMatchObject({ success: false, errorCode: "STALE_OBSERVATION", completedActions: 1, failedActionIndex: 1 });
+    expect(h.dispatchKeys).not.toHaveBeenCalled();
+    expect(h.humanTypeText).not.toHaveBeenCalled();
+  });
+
+  it("runs a planned click, type, Tab, type sequence with only a final snapshot", async () => {
+    const h = queueHarness();
+    const result = await h.run({
+      observationId: "obs-1",
+      queue: [
+        { type: "click", x: 500, y: 250, dwellMs: 0 },
+        { type: "type", text: "Ada", dwellMs: 0 },
+        { type: "keypress", keys: ["Tab"], dwellMs: 0 },
+        { type: "type", text: "ada@example.com", dwellMs: 0 },
+      ],
+      waitForIdle: false,
+    });
+    expect(result).toMatchObject({ success: true, completedActions: 4, observationId: "next" });
+    expect(h.humanTypeText.mock.calls).toEqual([["Ada"], ["ada@example.com"]]);
+    expect(h.dispatchKeys).toHaveBeenCalledWith(["Tab"]);
+    expect(h.assertFresh).toHaveBeenCalledOnce();
+    expect(h.viewport).not.toHaveBeenCalled();
+    expect(h.snapshot).toHaveBeenCalledOnce();
   });
 
   it("honors an explicit zero-duration wait", async () => {

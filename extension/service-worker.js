@@ -215,6 +215,7 @@ let attachedTabId = null;
 let attachedMainFrameId = null;
 let lastTargetTabId = null;
 let visualEpoch = 0;
+let controlContextEpoch = 0;
 let lastInvalidationReason = "startup";
 let lastInvalidatedAt = 0;
 let pointerState = null;
@@ -282,6 +283,9 @@ async function setStatus(status, extra = {}) {
 function invalidateVisualState(reason = "browser-control-action") {
   visualEpoch++;
   lastInvalidationReason = String(reason || "browser-control-action");
+  if (["main-frame-navigated", "main-frame-same-document-navigation", "tab-attached", "tab-detached", "attach-failed", "debugger-detached", "window-resized"].includes(lastInvalidationReason)) {
+    controlContextEpoch++;
+  }
   lastInvalidatedAt = Date.now();
   observations.clear();
 }
@@ -745,16 +749,34 @@ const ELEMENT_INDEX_HELPERS = `
   }
 `;
 
-const DOM_SNAPSHOT_SCRIPT = `(() => {
+const DOM_SNAPSHOT_SCRIPT = `(vw, vh) => {
   ${ELEMENT_INDEX_HELPERS}
   const SKIP = BC_SKIP_TAGS;
   const INLINE = new Set(['SPAN','EM','STRONG','B','I','U','A','ABBR','CODE','SMALL','SUB','SUP','MARK','TIME','LABEL']);
-  const vw = window.innerWidth || 1;
-  const vh = window.innerHeight || 1;
   function norm(v, max) { return Math.round(Math.max(0, Math.min(1000, (v / max) * 1000))); }
   const vis = bcVisible;
   const interactive = bcInteractive;
   const refs = new Map(bcInteractiveElements().map((el, i) => [el, i + 1]));
+  const focusedRef = refs.get(document.activeElement) || null;
+  const tabStops = [...refs.keys()].filter(el => el.tabIndex >= 0 && !el.matches(':disabled') && !el.closest('[inert]'));
+  // A radio group contributes one tab stop: its checked radio, or the first eligible radio.
+  const radioGroups = new Map();
+  for (const el of tabStops) {
+    if (el.tagName !== 'INPUT' || el.type !== 'radio' || !el.name) continue;
+    const owner = el.form || el.getRootNode();
+    if (!radioGroups.has(owner)) radioGroups.set(owner, new Map());
+    const groups = radioGroups.get(owner);
+    if (!groups.has(el.name) || el.checked) groups.set(el.name, el);
+  }
+  const tabOrder = tabStops.filter(el => {
+    if (el.tagName !== 'INPUT' || el.type !== 'radio' || !el.name) return true;
+    return radioGroups.get(el.form || el.getRootNode()).get(el.name) === el;
+  }).sort((a, b) => {
+    if (a.tabIndex === b.tabIndex) return 0;
+    if (a.tabIndex === 0) return 1;
+    if (b.tabIndex === 0) return -1;
+    return a.tabIndex - b.tabIndex;
+  }).map(el => refs.get(el));
   function attrs(el) {
     const parts = [];
     if (el.id) parts.push('id="' + el.id + '"');
@@ -775,13 +797,17 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
     if (el.checked !== undefined) parts.push(el.checked ? 'checked' : 'unchecked');
     if (el.disabled) parts.push('disabled');
     if (el.readOnly) parts.push('readonly');
+    parts.push('tabindex="' + el.tabIndex + '"');
+    if (el === document.activeElement) parts.push('focused');
     return parts.join(' ');
   }
   function coords(el) {
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return '';
-    const cx = norm(r.left + r.width / 2, vw);
-    const cy = norm(r.top + r.height / 2, vh);
+    if (r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh) return ' [offscreen]';
+    // Land inside the visible part of partially clipped elements instead of clamping their center.
+    const cx = norm((Math.max(0, r.left) + Math.min(vw, r.right)) / 2, vw);
+    const cy = norm((Math.max(0, r.top) + Math.min(vh, r.bottom)) / 2, vh);
     return ' @(' + cx + ',' + cy + ')';
   }
   const lines = [];
@@ -844,17 +870,19 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
   return {
     dom: lines.join('\\n'),
     interactiveCount: refs.size,
+    focusedRef,
+    tabOrder,
     viewportWidth: vw,
     viewportHeight: vh,
   };
-})()`;
+}`;
 
 async function snapshot(params = {}) {
   const tabId = await ensureAttached();
   const tab = await chrome.tabs.get(tabId);
   const vp = await viewport();
   const result = await send("Runtime.evaluate", {
-    expression: DOM_SNAPSHOT_SCRIPT,
+    expression: `(${DOM_SNAPSHOT_SCRIPT})(${vp.width}, ${vp.height})`,
     returnByValue: true,
   });
   const data = result?.result?.value || {};
@@ -874,6 +902,8 @@ async function snapshot(params = {}) {
     coordinateSpace: "normalized_1000",
     dom: data.dom || "",
     interactiveCount: data.interactiveCount || 0,
+    focusedRef: data.focusedRef ?? null,
+    tabOrder: data.tabOrder || [],
   };
 }
 
@@ -1385,12 +1415,15 @@ async function executeActionQueue(params = {}) {
     }
   }
 
+  await ensureAttached();
+  const queueTabId = attachedTabId;
+  const queueContextEpoch = controlContextEpoch;
   const usesPoint = (item) => !item.target
     && ["click", "double_click", "move"].includes(item.type || "click")
     && (item.x != null || item.y != null);
   // Coordinate items are all planned against one observation, so it must be current before any
   // input is sent. Later items keep using its mapping even though earlier items bump visualEpoch.
-  const record = queue.some(usesPoint) ? assertFresh(params.observationId) : null;
+  const record = (params.observationId || queue.some(usesPoint)) ? assertFresh(params.observationId) : null;
   const pointFor = (item) => {
     if (record.tabId !== attachedTabId) {
       const error = new Error("STALE_OBSERVATION: tab changed during the queue");
@@ -1409,6 +1442,11 @@ async function executeActionQueue(params = {}) {
       if (typeof paused !== "undefined" && paused) {
         const error = new Error("CONTROL_PAUSED_BY_USER");
         error.code = "CONTROL_PAUSED";
+        throw error;
+      }
+      if (attachedTabId !== queueTabId || controlContextEpoch !== queueContextEpoch) {
+        const error = new Error("STALE_OBSERVATION: tab, navigation, or viewport changed during the queue; take a new snapshot before continuing");
+        error.code = "STALE_OBSERVATION";
         throw error;
       }
       if (type === "click" || type === "double_click") {
@@ -1464,16 +1502,23 @@ async function executeActionQueue(params = {}) {
         if (![deltaX, deltaY].every(Number.isFinite) || Math.abs(deltaX) > 4000 || Math.abs(deltaY) > 4000) {
           throw new Error("scroll deltas must be finite numbers within ±4000");
         }
-        const vp = await viewport();
-        const p = normalizedPointToSource(item.x ?? 500, item.y ?? 500, {
-          sourceRegion: { x: 0, y: 0, width: vp.width, height: vp.height },
-        });
+        let scrollRecord = record;
+        if (!scrollRecord) {
+          const vp = await viewport();
+          scrollRecord = {
+            tabId: attachedTabId,
+            viewportWidth: vp.width,
+            viewportHeight: vp.height,
+            sourceRegion: { x: 0, y: 0, width: vp.width, height: vp.height },
+          };
+        }
+        const p = normalizedPointToSource(item.x ?? 500, item.y ?? 500, scrollRecord);
         const chunks = scrollChunks(deltaX, deltaY);
         for (const c of chunks) {
           await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: c.dx, deltaY: c.dy });
           await sleep(scrollStepDelayMs());
         }
-        setPointerFromViewport(p.x, p.y, vp.width, vp.height, "agent");
+        setPointerFromRecordPoint(p, scrollRecord, "agent");
         invalidateVisualState("agent-scroll");
         results.push({ action: "scroll" });
       } else if (type === "wait") {
