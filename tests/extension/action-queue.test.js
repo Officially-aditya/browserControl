@@ -29,11 +29,24 @@ function queueHarness(overrides = {}, realTyping = false) {
     scrollChunks: (dx, dy) => [{ dx, dy }],
     scrollStepDelayMs: () => 0,
     setPointerFromViewport: vi.fn(),
+    setPointerFromRecordPoint: vi.fn(),
     invalidateVisualState: vi.fn(),
     waitFor: vi.fn(async () => ({ success: true, reason: "idle" })),
     snapshot: vi.fn(async () => ({ observationId: "next", dom: "updated page" })),
     ensureAttached: vi.fn(async () => 1),
     humanTypeText: vi.fn(async () => {}),
+    humanMouseMoveTo: vi.fn(async () => {}),
+    dispatchClick: vi.fn(async () => {}),
+    dispatchKeys: vi.fn(async () => {}),
+    resolveElement: vi.fn(async () => ({ x: 100, y: 100, width: 50, height: 20 })),
+    assertFresh: vi.fn(() => ({
+      tabId: 1,
+      sourceRegion: { x: 0, y: 0, width: 1400, height: 800 },
+      viewportWidth: 1400,
+      viewportHeight: 800,
+    })),
+    attachedTabId: 1,
+    paused: false,
     FOCUS_ELEMENT_SCRIPT: "focus",
     visualEpoch: 1,
     ...overrides,
@@ -98,11 +111,51 @@ describe("extension action queue", () => {
     expect(h.sleep.mock.calls[0]).toEqual([0]);
   });
 
+  it("executes coordinate clicks and double-clicks with observation mapping", async () => {
+    const h = queueHarness();
+    const result = await h.run({
+      observationId: "obs-1",
+      queue: [
+        { type: "click", x: 500, y: 250, dwellMs: 0 },
+        { type: "double_click", x: 200, y: 100, button: "left", dwellMs: 0 },
+      ],
+      waitForIdle: false,
+    });
+    expect(result).toMatchObject({ success: true, completedActions: 2 });
+    expect(h.assertFresh).toHaveBeenCalledWith("obs-1");
+    expect(h.dispatchClick).toHaveBeenNthCalledWith(1, 700, 200, "left", 1);
+    expect(h.dispatchClick).toHaveBeenNthCalledWith(2, 280, 80, "left", 2);
+    expect(h.setPointerFromRecordPoint).toHaveBeenCalledTimes(2);
+  });
+
+  it("executes keypress shortcut actions", async () => {
+    const h = queueHarness();
+    const result = await h.run({
+      queue: [{ type: "keypress", keys: ["Enter"], dwellMs: 0 }],
+      waitForIdle: false,
+    });
+    expect(result).toMatchObject({ success: true, completedActions: 1 });
+    expect(h.dispatchKeys).toHaveBeenCalledWith(["Enter"]);
+    expect(h.invalidateVisualState).toHaveBeenCalledWith("agent-keypress");
+  });
+
+  it("types into the focused element when target is omitted", async () => {
+    const h = queueHarness();
+    const result = await h.run({
+      queue: [{ type: "type", text: "direct text", dwellMs: 0 }],
+      waitForIdle: false,
+    });
+    expect(result).toMatchObject({ success: true, completedActions: 1 });
+    expect(h.humanTypeText).toHaveBeenCalledWith("direct text");
+    expect(h.typeElement).not.toHaveBeenCalled();
+    expect(h.invalidateVisualState).toHaveBeenCalledWith("agent-type");
+  });
+
   it("rejects unsupported action types before executing any items", async () => {
     const h = queueHarness();
     await expect(h.run({
-      queue: [{ type: "click", target: { ref: 1 } }, { type: "keypress", keys: ["Enter"] }],
-    })).rejects.toThrow(/unsupported.*keypress/i);
+      queue: [{ type: "click", target: { ref: 1 } }, { type: "unknown_action" }],
+    })).rejects.toThrow(/unsupported.*unknown_action/i);
     expect(h.clickElement).not.toHaveBeenCalled();
   });
 

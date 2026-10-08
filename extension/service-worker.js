@@ -705,13 +705,13 @@ async function inspectRegion(params = {}) {
   };
 }
 
-const DOM_SNAPSHOT_SCRIPT = `(() => {
-  const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
-  const INLINE = new Set(['SPAN','EM','STRONG','B','I','U','A','ABBR','CODE','SMALL','SUB','SUP','MARK','TIME','LABEL']);
-  const vw = window.innerWidth || 1;
-  const vh = window.innerHeight || 1;
-  function norm(v, max) { return Math.round(Math.max(0, Math.min(1000, (v / max) * 1000))); }
-  function vis(el) {
+// Page-side helpers shared by browser_snapshot and every ref-based resolver. A ref is the
+// 1-based position in bcInteractiveElements(), so snapshot labels and click/type targets
+// always agree on which element a number means.
+const ELEMENT_INDEX_HELPERS = `
+  const BC_SKIP_TAGS = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
+  const BC_INTERACTIVE_ROLES = new Set(['button','link','textbox','checkbox','radio','combobox','listbox','menuitem','tab','switch','slider','searchbox','option','menuitemcheckbox','menuitemradio','treeitem']);
+  function bcVisible(el) {
     if (el.tagName === 'BODY' || el.tagName === 'HTML') return true;
     const s = getComputedStyle(el);
     if (s.display === 'none' || s.visibility === 'hidden') return false;
@@ -719,16 +719,42 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
     if (r.width > 0 && r.height > 0) return true;
     return !!el.offsetParent;
   }
-  function interactive(el) {
+  function bcInteractive(el) {
     const tag = el.tagName;
     if (['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag)) return true;
     const role = el.getAttribute('role');
-    if (role && ['button','link','textbox','checkbox','radio','combobox','listbox','menuitem','tab','switch','slider','searchbox','option','menuitemcheckbox','menuitemradio','treeitem'].includes(role)) return true;
+    if (role && BC_INTERACTIVE_ROLES.has(role)) return true;
     if (el.contentEditable === 'true') return true;
     if (el.getAttribute('tabindex') !== null && Number(el.getAttribute('tabindex')) >= 0) return true;
     if (el.onclick || el.getAttribute('onclick')) return true;
     return false;
   }
+  function bcIsSvg(el) {
+    return el.tagName === 'SVG' || el.namespaceURI === 'http://www.w3.org/2000/svg';
+  }
+  function bcInteractiveElements() {
+    const found = [];
+    const walk = (node) => {
+      if (!node || node.nodeType !== 1) return;
+      if (BC_SKIP_TAGS.has(node.tagName) || bcIsSvg(node) || !bcVisible(node)) return;
+      if (bcInteractive(node)) found.push(node);
+      for (const child of node.children) walk(child);
+    };
+    walk(document.body);
+    return found;
+  }
+`;
+
+const DOM_SNAPSHOT_SCRIPT = `(() => {
+  ${ELEMENT_INDEX_HELPERS}
+  const SKIP = BC_SKIP_TAGS;
+  const INLINE = new Set(['SPAN','EM','STRONG','B','I','U','A','ABBR','CODE','SMALL','SUB','SUP','MARK','TIME','LABEL']);
+  const vw = window.innerWidth || 1;
+  const vh = window.innerHeight || 1;
+  function norm(v, max) { return Math.round(Math.max(0, Math.min(1000, (v / max) * 1000))); }
+  const vis = bcVisible;
+  const interactive = bcInteractive;
+  const refs = new Map(bcInteractiveElements().map((el, i) => [el, i + 1]));
   function attrs(el) {
     const parts = [];
     if (el.id) parts.push('id="' + el.id + '"');
@@ -759,7 +785,6 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
     return ' @(' + cx + ',' + cy + ')';
   }
   const lines = [];
-  let idx = 0;
   function text(el) {
     let t = '';
     for (const c of el.childNodes) {
@@ -767,25 +792,27 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
     }
     return t.replace(/\\s+/g, ' ').trim().slice(0, 500);
   }
+  function refLine(el, ref, pad) {
+    const a = attrs(el);
+    const t = text(el);
+    const label = t ? ' "' + t.slice(0, 200) + '"' : '';
+    return pad + '[' + ref + '] ' + el.tagName.toLowerCase() + (a ? ' ' + a : '') + label + coords(el);
+  }
   function walk(el, depth) {
     if (!el || el.nodeType !== 1) return;
     const tag = el.tagName;
     if (SKIP.has(tag)) return;
-    if (tag === 'SVG' || el.namespaceURI === 'http://www.w3.org/2000/svg') {
+    if (bcIsSvg(el)) {
       lines.push('  '.repeat(depth) + '[svg]');
       return;
     }
     if (!vis(el)) return;
     const isI = interactive(el);
     const pad = '  '.repeat(depth);
-    const a = attrs(el);
     const t = text(el);
     const tagLower = tag.toLowerCase();
     if (isI) {
-      idx++;
-      const c = coords(el);
-      const label = t ? ' "' + t.slice(0, 200) + '"' : '';
-      lines.push(pad + '[' + idx + '] ' + tagLower + (a ? ' ' + a : '') + label + c);
+      lines.push(refLine(el, refs.get(el), pad));
     } else if (['H1','H2','H3','H4','H5','H6'].includes(tag)) {
       lines.push(pad + tagLower + ': ' + t);
     } else if (tag === 'IMG') {
@@ -794,12 +821,16 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
     } else if (tag === 'TABLE') {
       lines.push(pad + '[table]');
     } else if (tag === 'TR') {
-      const cells = Array.from(el.querySelectorAll('td,th')).map(c => {
-        const ci = interactive(c);
-        if (ci) { idx++; return '[' + idx + '] ' + text(c) + coords(c); }
-        return text(c);
-      }).filter(Boolean);
+      const cells = Array.from(el.children)
+        .filter(c => c.tagName === 'TD' || c.tagName === 'TH')
+        .map(c => text(c) || (c.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 200))
+        .filter(Boolean);
       if (cells.length) lines.push(pad + '  row: ' + cells.join(' | '));
+      // List every numbered element inside the row so no ref is hidden from the agent.
+      for (const node of el.querySelectorAll('*')) {
+        const ref = refs.get(node);
+        if (ref) lines.push(refLine(node, ref, pad + '    '));
+      }
       return;
     } else if (INLINE.has(tag) || tag === 'P' || tag === 'LI' || tag === 'DIV' || tag === 'SECTION' || tag === 'MAIN' || tag === 'NAV' || tag === 'HEADER' || tag === 'FOOTER' || tag === 'ASIDE' || tag === 'ARTICLE') {
       if (t && !el.children.length) {
@@ -812,7 +843,7 @@ const DOM_SNAPSHOT_SCRIPT = `(() => {
   walk(document.body, 0);
   return {
     dom: lines.join('\\n'),
-    interactiveCount: idx,
+    interactiveCount: refs.size,
     viewportWidth: vw,
     viewportHeight: vh,
   };
@@ -861,28 +892,31 @@ async function mouseMove(params) {
   return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
 
-async function mouseClick(params, clickCount = 1) {
-  const record = assertFresh(params.observationId);
-  const p = normalizedPointToSource(params.x, params.y, record);
-  const button = params.button || "left";
-
+/** Humanized press/hold/release at viewport CSS-pixel coordinates (shared by browser_click and queued clicks). */
+async function dispatchClick(x, y, button = "left", clickCount = 1) {
   // 1. Move to target along Bézier curve
-  await humanMouseMoveTo(p.x, p.y);
+  await humanMouseMoveTo(x, y);
 
   // 2. Pre-click hover delay
   await sleep(preClickDelayMs());
 
   // 3. Press with hold duration
-  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button, clickCount });
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
   await sleep(clickHoldMs());
 
   // 4. Release with slight jitter
   const jitter = clickJitter();
   await send("Input.dispatchMouseEvent", {
     type: "mouseReleased",
-    x: p.x + jitter.dx, y: p.y + jitter.dy,
+    x: x + jitter.dx, y: y + jitter.dy,
     button, clickCount,
   });
+}
+
+async function mouseClick(params, clickCount = 1) {
+  const record = assertFresh(params.observationId);
+  const p = normalizedPointToSource(params.x, params.y, record);
+  await dispatchClick(p.x, p.y, params.button || "left", clickCount);
 
   setPointerFromRecordPoint(p, record, "agent");
   invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
@@ -1011,9 +1045,9 @@ async function typeText(params) {
   return { success: true, visualEpoch };
 }
 
-async function keypress(params) {
-  assertFresh(params.observationId);
-  const events = keyEvents(params.keys);
+/** Send one keyboard shortcut (shared by browser_keypress and queued keypress items). */
+async function dispatchKeys(keys) {
+  const events = keyEvents(keys);
   await send("Input.dispatchKeyEvent", events.down);
   if (!events.down.modifiers && events.down.text) {
     await send("Input.dispatchKeyEvent", {
@@ -1024,53 +1058,24 @@ async function keypress(params) {
   }
   await sleep(shortcutHoldMs());
   await send("Input.dispatchKeyEvent", events.up);
+}
+
+async function keypress(params) {
+  assertFresh(params.observationId);
+  await dispatchKeys(params.keys);
   invalidateVisualState("agent-keypress");
   return { success: true, visualEpoch };
 }
 
 const RESOLVE_ELEMENT_SCRIPT = `(selector, ref, text) => {
-  function vis(el) {
-    if (el.tagName === 'BODY' || el.tagName === 'HTML') return true;
-    const s = getComputedStyle(el);
-    if (s.display === 'none' || s.visibility === 'hidden') return false;
-    const r = el.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) return true;
-    return !!el.offsetParent;
-  }
-  function interactive(el) {
-    const tag = el.tagName;
-    if (['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag)) return true;
-    const role = el.getAttribute('role');
-    if (role && ['button','link','textbox','checkbox','radio','combobox','listbox','menuitem','tab','switch','slider','searchbox','option','menuitemcheckbox','menuitemradio','treeitem'].includes(role)) return true;
-    if (el.contentEditable === 'true') return true;
-    if (el.getAttribute('tabindex') !== null && Number(el.getAttribute('tabindex')) >= 0) return true;
-    if (el.onclick || el.getAttribute('onclick')) return true;
-    return false;
-  }
+  ${ELEMENT_INDEX_HELPERS}
+  const vis = bcVisible;
 
   let el = null;
   if (selector) {
     el = document.querySelector(selector);
   } else if (typeof ref === 'number' && ref > 0) {
-    const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
-    let currentIdx = 0;
-    function walk(node) {
-      if (!node || node.nodeType !== 1) return;
-      if (SKIP.has(node.tagName)) return;
-      if (!vis(node)) return;
-      if (interactive(node)) {
-        currentIdx++;
-        if (currentIdx === ref) {
-          el = node;
-          return;
-        }
-      }
-      for (const child of node.children) {
-        walk(child);
-        if (el) return;
-      }
-    }
-    walk(document.body);
+    el = bcInteractiveElements()[ref - 1] || null;
   } else if (text) {
     const target = String(text).trim().toLowerCase();
     const candidateNodes = document.querySelectorAll('a, button, input, select, textarea, label, [role="button"], [role="radio"], [role="checkbox"], [role="option"], [role="tab"], p, span, div, li, td, h1, h2, h3, h4, h5, h6');
@@ -1164,53 +1169,40 @@ async function clickElement(params = {}) {
 }
 
 const FOCUS_ELEMENT_SCRIPT = `(selector, ref, text) => {
-  function vis(el) {
-    if (el.tagName === 'BODY' || el.tagName === 'HTML') return true;
-    const s = getComputedStyle(el);
-    if (s.display === 'none' || s.visibility === 'hidden') return false;
-    const r = el.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) return true;
-    return !!el.offsetParent;
-  }
+  ${ELEMENT_INDEX_HELPERS}
+  const vis = bcVisible;
   let el = null;
   if (selector) {
     el = document.querySelector(selector);
   } else if (typeof ref === 'number' && ref > 0) {
-    const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','LINK','META','BR','WBR','HEAD']);
-    let currentIdx = 0;
-    function walk(node) {
-      if (!node || node.nodeType !== 1) return;
-      if (SKIP.has(node.tagName)) return;
-      if (!vis(node)) return;
-      const tag = node.tagName;
-      const isI = ['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag) ||
-        node.getAttribute('role') || node.contentEditable === 'true' ||
-        (node.getAttribute('tabindex') !== null && Number(node.getAttribute('tabindex')) >= 0) ||
-        node.onclick;
-      if (isI) {
-        currentIdx++;
-        if (currentIdx === ref) {
-          el = node;
-          return;
-        }
-      }
-      for (const child of node.children) {
-        walk(child);
-        if (el) return;
-      }
-    }
-    walk(document.body);
+    el = bcInteractiveElements()[ref - 1] || null;
   } else if (text) {
-    const target = String(text).trim().toLowerCase();
-    const candidateNodes = document.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="textbox"]');
+    const norm = (v) => String(v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const target = norm(text);
+    const NON_TEXT_INPUTS = new Set(['button','submit','reset','checkbox','radio','file','image','hidden','range','color']);
+    const names = (node) => {
+      const out = [node.placeholder, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('name'), node.id];
+      for (const label of node.labels || []) out.push(label.innerText || label.textContent);
+      for (const id of (node.getAttribute('aria-labelledby') || '').split(' ')) {
+        const labelEl = id && document.getElementById(id);
+        if (labelEl) out.push(labelEl.innerText || labelEl.textContent);
+      }
+      if (node.isContentEditable || node.getAttribute('role') === 'textbox') out.push(node.textContent);
+      return out.map(norm).filter(Boolean);
+    };
+    let partial = null;
+    const candidateNodes = document.querySelectorAll('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]');
     for (const node of candidateNodes) {
-      if (!vis(node)) continue;
-      const t = (node.placeholder || node.value || node.textContent || node.getAttribute('aria-label') || '').trim().toLowerCase();
-      if (t === target || t.includes(target)) {
+      if (!vis(node) || node.disabled || node.readOnly) continue;
+      if (node.tagName === 'INPUT' && NON_TEXT_INPUTS.has(String(node.type || '').toLowerCase())) continue;
+      const n = names(node);
+      if (n.includes(target) || norm(node.value) === target) {
         el = node;
         break;
       }
+      if (!partial && n.some((v) => v.includes(target))) partial = node;
     }
+    if (!el) el = partial;
   }
 
   if (!el) return null;
@@ -1386,11 +1378,27 @@ async function selectAndAdvance(params = {}) {
 async function executeActionQueue(params = {}) {
   const queue = Array.isArray(params.queue) ? params.queue : [];
   if (queue.length === 0) throw new Error("queue must be a non-empty array of actions");
+  const supportedTypes = ["click", "double_click", "move", "type", "keypress", "scroll", "wait"];
   for (const [i, item] of queue.entries()) {
-    if (!item || typeof item !== "object" || !["click", "type", "scroll", "wait"].includes(item.type || "click")) {
+    if (!item || typeof item !== "object" || !supportedTypes.includes(item.type || "click")) {
       throw new Error(`Unsupported queue action type at index ${i}: ${item?.type}`);
     }
   }
+
+  const usesPoint = (item) => !item.target
+    && ["click", "double_click", "move"].includes(item.type || "click")
+    && (item.x != null || item.y != null);
+  // Coordinate items are all planned against one observation, so it must be current before any
+  // input is sent. Later items keep using its mapping even though earlier items bump visualEpoch.
+  const record = queue.some(usesPoint) ? assertFresh(params.observationId) : null;
+  const pointFor = (item) => {
+    if (record.tabId !== attachedTabId) {
+      const error = new Error("STALE_OBSERVATION: tab changed during the queue");
+      error.code = "STALE_OBSERVATION";
+      throw error;
+    }
+    return normalizedPointToSource(item.x, item.y, record);
+  };
 
   const results = [];
   for (let i = 0; i < queue.length; i++) {
@@ -1398,16 +1406,58 @@ async function executeActionQueue(params = {}) {
     const type = item.type || "click";
 
     try {
-      if (type === "click") {
-        const clickRes = await clickElement(item.target || item);
-        results.push({ action: "click", result: clickRes });
+      if (typeof paused !== "undefined" && paused) {
+        const error = new Error("CONTROL_PAUSED_BY_USER");
+        error.code = "CONTROL_PAUSED";
+        throw error;
+      }
+      if (type === "click" || type === "double_click") {
+        const button = item.button || "left";
+        const clickCount = type === "double_click" ? 2 : 1;
+        if (usesPoint(item)) {
+          const p = pointFor(item);
+          await dispatchClick(p.x, p.y, button, clickCount);
+          setPointerFromRecordPoint(p, record, "agent");
+          invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
+          results.push({ action: type, x: item.x, y: item.y });
+        } else {
+          const clickRes = await clickElement({ ...(item.target || item), button, clickCount });
+          results.push({ action: type, result: clickRes });
+        }
+      } else if (type === "move") {
+        if (usesPoint(item)) {
+          const p = pointFor(item);
+          await humanMouseMoveTo(p.x, p.y);
+          setPointerFromRecordPoint(p, record, "agent");
+        } else {
+          const rect = await resolveElement(item.target || {});
+          await humanMouseMoveTo(rect.x, rect.y);
+          const vp = await viewport();
+          setPointerFromViewport(rect.x, rect.y, vp.width, vp.height, "agent");
+        }
+        invalidateVisualState("agent-move");
+        results.push({ action: "move" });
       } else if (type === "type") {
-        const typeRes = await typeElement({
-          ...(item.target || {}),
-          queryText: item.target?.text,
-          text: item.text,
-        });
-        results.push({ action: "type", result: typeRes });
+        if (item.target) {
+          const typeRes = await typeElement({
+            ...item.target,
+            queryText: item.target.text,
+            text: item.text,
+          });
+          results.push({ action: "type", result: typeRes });
+        } else {
+          // No target: type into whatever currently has focus (e.g. after a coordinate click).
+          const text = String(item.text ?? "");
+          if (text.length > 5000) throw new Error("type text must be at most 5000 characters");
+          await humanTypeText(text);
+          invalidateVisualState("agent-type");
+          results.push({ action: "type", target: "focused" });
+        }
+      } else if (type === "keypress") {
+        if (!Array.isArray(item.keys) || item.keys.length === 0) throw new Error("keypress needs a non-empty keys array");
+        await dispatchKeys(item.keys);
+        invalidateVisualState("agent-keypress");
+        results.push({ action: "keypress", keys: item.keys });
       } else if (type === "scroll") {
         const deltaX = item.deltaX ?? 0;
         const deltaY = item.deltaY ?? 0;

@@ -107,6 +107,41 @@ describe("canonical browserControl tools", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(partial);
   });
 
+  it("requires observationId when a queue item uses x/y coordinates without a target", async () => {
+    const route = fakeRoute();
+    const result = await handleBrowserToolCall(route, "client-a", "browser_action_queue", {
+      queue: [{ type: "click", x: 500, y: 300 }],
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).errorCode).toBe("OBSERVATION_REQUIRED");
+    expect(route.bridge.call).not.toHaveBeenCalled();
+  });
+
+  it("allows coordinate clicks, focused typing, and keypress shortcuts in a queue with observationId", async () => {
+    const route = fakeRoute();
+    const args = {
+      observationId: "obs-99",
+      queue: [
+        { type: "click", x: 400, y: 300 },
+        { type: "type", text: "hello world" },
+        { type: "keypress", keys: ["Enter"] },
+      ],
+    };
+    const result = await handleBrowserToolCall(route, "client-a", "browser_action_queue", args);
+    expect(result.isError).toBeUndefined();
+    expect(route.bridge.call).toHaveBeenCalledWith("action_queue", args, expect.any(Number));
+  });
+
+  it("blocks paste keyboard shortcuts inside a queue", async () => {
+    const route = fakeRoute();
+    const result = await handleBrowserToolCall(route, "client-a", "browser_action_queue", {
+      queue: [{ type: "keypress", keys: ["Control", "v"] }],
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).errorCode).toBe("PASTE_DISABLED");
+    expect(route.bridge.call).not.toHaveBeenCalled();
+  });
+
   it("returns screenshots as MCP image content", async () => {
     const route = fakeRoute((method) => {
       expect(method).toBe("observe");

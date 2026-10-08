@@ -1,8 +1,10 @@
 import { Server, type Tool } from "@modelcontextprotocol/server";
 import { assertSafeNavigationUrl, assertSafeNewTabUrl } from "../browser/safe-url.js";
 import type { BrowserRoute } from "./bridge.js";
+import { actionQueueTimeoutMs } from "./action-queue.js";
 
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false } as const;
+const QUEUE_ACTION_TYPES = ["click", "double_click", "move", "type", "keypress", "scroll", "wait"];
 const OBSERVATION_SCHEMA = {
   type: "object" as const,
   properties: { observationId: { type: "string" } },
@@ -247,20 +249,22 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_action_queue",
-      description: 'Execute multiple known actions sequentially in ONE tool call. Prefer this over separate click/type/scroll/wait calls when the next steps are already known, such as filling several fields then clicking Submit, or selecting several options then Next. Supports click, type, scroll, wait only. No observationId is needed: click/type targets resolve live. Example: {"queue":[{"type":"type","target":{"text":"Email"},"text":"ada@example.com"},{"type":"click","target":{"text":"Next"}}]}. Each target uses ref from browser_snapshot, selector, or text (placeholder/label for typing). Prefer selectors or text if earlier actions change the DOM; refs can shift. Batch only until you need new page information. Returns completedActions, per-action results, and a final snapshot; stops on a failed action and reports its zero-based failedActionIndex. timeoutMs controls only the final wait, not the whole queue.',
+      description: 'Execute multiple known actions sequentially in ONE tool call. Prefer this over separate click/type/keypress/scroll/wait calls when the next steps are already known, such as filling several fields then clicking Submit, or selecting several options then Next. Supports click, double_click, move, type, keypress, scroll, wait. Works with both DOM targets and mouse/keyboard coordinates. DOM targets: set item.target to ref from browser_snapshot, a CSS selector, or text (visible text for clicks; placeholder/label/aria-label/name for typing); these resolve live, so no observationId is needed. Prefer selectors or text if earlier actions change the DOM; refs can shift. Coordinates: omit target and set x/y (normalized 0-1000) on click/double_click/move, and pass the queue-level observationId from browser_observe/browser_snapshot/browser_inspect that the coordinates came from. That observation must be current when the queue starts. Every coordinate item is mapped through it, so only batch coordinate actions whose targets will not move because of earlier items. type without a target types into the currently focused element (e.g. after a coordinate click); keypress sends shortcuts like ["Enter"] or ["Tab"]. Examples: {"queue":[{"type":"type","target":{"text":"Email"},"text":"ada@example.com"},{"type":"click","target":{"text":"Next"}}]} or {"observationId":"…","queue":[{"type":"click","x":412,"y":230},{"type":"type","text":"hello"},{"type":"keypress","keys":["Enter"]}]}. Batch only until you need new page information. Returns completedActions, per-action results, and a final snapshot; stops on a failed action and reports its zero-based failedActionIndex. Stops with CONTROL_PAUSED if the user pauses control. timeoutMs controls only the final wait, not the whole queue.',
       inputSchema: {
         type: "object" as const,
         properties: {
+          observationId: { type: "string", description: "Observation the x/y coordinates come from. Required when any click/double_click/move item uses x/y instead of target." },
           queue: {
             type: "array",
             minItems: 1,
-            description: "Actions in execution order. Put field values in item.text and the element locator in item.target.",
+            description: "Actions in execution order. Put field values in item.text and the element locator in item.target, or use x/y coordinates from observationId.",
             items: {
               type: "object",
               properties: {
-                type: { type: "string", enum: ["click", "type", "scroll", "wait"], default: "click", description: "Action kind; defaults to click when omitted" },
+                type: { type: "string", enum: ["click", "double_click", "move", "type", "keypress", "scroll", "wait"], default: "click", description: "Action kind; defaults to click when omitted" },
                 target: {
                   type: "object",
+                  description: "DOM element to act on (click/double_click/move/type). Omit to use x/y coordinates, or for type to use the focused element.",
                   properties: {
                     ref: { type: "number", minimum: 1 },
                     selector: { type: "string", maxLength: 1000 },
@@ -269,9 +273,11 @@ export function browserTools(): Tool[] {
                   additionalProperties: false,
                 },
                 text: { type: "string", maxLength: 5000, description: "Text to type (for type action)" },
+                keys: { type: "array", minItems: 1, maxItems: 10, items: { type: "string", minLength: 1, maxLength: 50 }, description: "Keyboard shortcut for keypress, e.g. [\"Enter\"] or [\"Control\",\"A\"]" },
+                button: { type: "string", enum: ["left", "right", "middle"], default: "left", description: "Mouse button for click/double_click" },
                 dwellMs: { type: "number", minimum: 0, maximum: 15000, description: "Dwell time after this action in ms" },
-                x: { type: "number", minimum: 0, maximum: 1000, default: 500, description: "Normalized scroll position" },
-                y: { type: "number", minimum: 0, maximum: 1000, default: 500, description: "Normalized scroll position" },
+                x: { type: "number", minimum: 0, maximum: 1000, description: "Normalized x: click/double_click/move point from observationId, or scroll wheel position (default 500)" },
+                y: { type: "number", minimum: 0, maximum: 1000, description: "Normalized y: click/double_click/move point from observationId, or scroll wheel position (default 500)" },
                 deltaX: { type: "number", minimum: -4000, maximum: 4000, description: "Horizontal scroll delta in CSS pixels" },
                 deltaY: { type: "number", minimum: -4000, maximum: 4000, description: "Vertical scroll delta in CSS pixels" },
                 ms: { type: "number", minimum: 0, maximum: 30000, default: 1000, description: "Wait duration in ms (for wait action)" },
@@ -327,12 +333,44 @@ function assertAllowedCall(method: string, args: Record<string, any>): Record<st
       throw Object.assign(new Error("queue must be a non-empty array of actions"), { code: "INVALID_PARAM" });
     }
     for (const [index, item] of next.queue.entries()) {
-      if (!item || typeof item !== "object" || !["click", "type", "scroll", "wait"].includes(item.type || "click")) {
+      if (!item || typeof item !== "object" || !QUEUE_ACTION_TYPES.includes(item.type || "click")) {
         throw Object.assign(new Error(`Unsupported queue action type at index ${index}: ${item?.type}`), { code: "INVALID_PARAM" });
       }
-      if (item.type === "type") {
+      const type = item.type || "click";
+      if (type === "type") {
         if (typeof item.text !== "string") throw Object.assign(new Error(`queue[${index}].text is required for typing`), { code: "INVALID_PARAM" });
         assertAllowedCall("type", item);
+      }
+      if (type === "keypress") {
+        if (!Array.isArray(item.keys) || item.keys.length === 0) {
+          throw Object.assign(new Error(`queue[${index}].keys must be a non-empty array for keypress`), { code: "INVALID_PARAM" });
+        }
+        assertAllowedCall("keypress", item);
+      }
+      if (type === "scroll") assertAllowedCall("scroll", item);
+      if (item.target != null) {
+        const target = item.target;
+        if (typeof target !== "object" || (target.ref == null && !target.selector && !target.text)) {
+          throw Object.assign(new Error(`queue[${index}].target needs ref, selector, or text`), { code: "INVALID_PARAM" });
+        }
+      } else if (type === "click" || type === "double_click" || type === "move") {
+        const hasPoint = item.x != null || item.y != null;
+        if (hasPoint) {
+          for (const field of ["x", "y"] as const) {
+            const value = item[field];
+            if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1000) {
+              throw Object.assign(new Error(`queue[${index}].${field} must be a number between 0 and 1000`), { code: "INVALID_PARAM" });
+            }
+          }
+          if (typeof next.observationId !== "string" || !next.observationId) {
+            throw Object.assign(
+              new Error(`queue[${index}] uses x/y coordinates, so the queue needs the observationId they came from`),
+              { code: "OBSERVATION_REQUIRED" },
+            );
+          }
+        } else if (type === "move" || typeof item.text !== "string") {
+          throw Object.assign(new Error(`queue[${index}] ${type} needs a target or x/y coordinates`), { code: "INVALID_PARAM" });
+        }
       }
       for (const [field, maximum] of [["dwellMs", 15000], ["ms", 30000]] as const) {
         const value = item[field];
@@ -391,12 +429,7 @@ export async function handleBrowserToolCall(
       throw Object.assign(new Error("Another AI client currently controls this browser. Try again after its lease expires or is released."), { code: "DEVICE_BUSY" });
     }
     if (method === "action_queue") {
-      // Human typing, per-action dwell, and explicit waits can exceed the normal 30s RPC limit.
-      const executionMs = safeParams.queue.reduce((total: number, item: Record<string, any>) =>
-        total + 3000 + (item.dwellMs ?? 1000)
-        + (item.type === "type" ? item.text.length * 400 : 0)
-        + (item.type === "wait" ? (item.ms ?? 1000) : 0), 0);
-      const timeoutMs = 30_000 + executionMs + (safeParams.timeoutMs ?? 10_000);
+      const timeoutMs = actionQueueTimeoutMs(safeParams);
       const keepLease = setInterval(() => route.lease.acquire(clientId), 10_000);
       try {
         return await route.bridge.call(method, safeParams, timeoutMs);

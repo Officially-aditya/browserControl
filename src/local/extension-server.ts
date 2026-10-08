@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { ExtensionBridge } from "../browser-control/bridge.js";
+import { actionQueueTimeoutMs } from "../browser-control/action-queue.js";
 
 export const DEFAULT_LOCAL_HOST = "127.0.0.1";
 export const DEFAULT_LOCAL_PORT = 8765;
@@ -89,7 +90,8 @@ export async function startLocalExtensionServer(
               effectiveParams.observationId = lastObservation.observationId;
             }
           }
-          const result = await bridge.call(method as any, effectiveParams);
+          const timeoutMs = method === "action_queue" ? actionQueueTimeoutMs(effectiveParams) : undefined;
+          const result = await bridge.call(method as any, effectiveParams, timeoutMs);
           if (result && (result as any).observationId) {
             lastObservation = {
               observationId: (result as any).observationId,
