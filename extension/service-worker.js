@@ -726,6 +726,8 @@ const ELEMENT_INDEX_HELPERS = `
   function bcInteractive(el) {
     const tag = el.tagName;
     if (['A','BUTTON','INPUT','SELECT','TEXTAREA','DETAILS','SUMMARY'].includes(tag)) return true;
+    // Styled choices often hide the native input and make its label the visible target.
+    if (tag === 'LABEL' && el.control && ['radio','checkbox'].includes(el.control.type) && !bcVisible(el.control)) return true;
     const role = el.getAttribute('role');
     if (role && BC_INTERACTIVE_ROLES.has(role)) return true;
     if (el.contentEditable === 'true') return true;
@@ -777,6 +779,52 @@ const DOM_SNAPSHOT_SCRIPT = `(vw, vh) => {
     if (b.tabIndex === 0) return -1;
     return a.tabIndex - b.tabIndex;
   }).map(el => refs.get(el));
+  function name(el) {
+    if (!el) return '';
+    const labelledBy = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)?.textContent || '').join(' ').trim();
+    const labels = Array.from((el.tagName === 'LABEL' ? el.control?.labels : el.labels) || []).map(label => label.textContent || '').join(' ');
+    return (labelledBy || el.getAttribute('aria-label') || labels || '').replace(/\\s+/g, ' ').trim().slice(0, 200);
+  }
+  function cellText(el) {
+    return (name(el) || el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 200);
+  }
+  function matrixContext(el) {
+    const cell = el.closest('td, th, [role="gridcell"], [role="cell"]');
+    const row = cell?.closest('tr, [role="row"]');
+    const table = row?.closest('table, [role="grid"], [role="table"]');
+    if (!table) return [];
+    const cells = r => Array.from(r.children).filter(c => ['TD','TH'].includes(c.tagName)
+      || ['gridcell','cell','rowheader','columnheader'].includes(c.getAttribute('role')));
+    const parts = [];
+    const headers = (cell.getAttribute('headers') || '').split(/\\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)).filter(Boolean).map(cellText).filter(Boolean);
+    if (headers.length) parts.push('headers=' + JSON.stringify(headers.join(' | ')));
+    const rowCells = cells(row);
+    const rowHeader = rowCells.find(c => c.getAttribute('role') === 'rowheader' || c.getAttribute('scope') === 'row')
+      || (rowCells[0] !== cell ? rowCells[0] : null);
+    if (rowHeader && cellText(rowHeader)) parts.push('row=' + JSON.stringify(cellText(rowHeader)));
+    const span = c => Math.max(1, Number(c.getAttribute('colspan') || c.getAttribute('aria-colspan')) || 1);
+    const column = Number(cell.getAttribute('aria-colindex')) || (rowCells.slice(0, rowCells.indexOf(cell)).reduce((n, c) => n + span(c), 0) + 1);
+    const columnNames = [];
+    for (const headerRow of table.querySelectorAll('tr, [role="row"]')) {
+      if (headerRow === row) break;
+      if (headerRow.closest('table, [role="grid"], [role="table"]') !== table) continue;
+      const headerCells = cells(headerRow);
+      let start = 1;
+      for (const header of headerCells) {
+        start = Number(header.getAttribute('aria-colindex')) || start;
+        const isHeader = header.getAttribute('role') === 'columnheader' || (header.tagName === 'TH'
+          && (['col','colgroup'].includes(header.getAttribute('scope')) || headerRow.parentElement?.tagName === 'THEAD'
+            || headerCells.every(c => c.tagName === 'TH'))
+          && !['row','rowgroup'].includes(header.getAttribute('scope')));
+        if (isHeader && column >= start && column < start + span(header) && cellText(header)) columnNames.push(cellText(header));
+        start += span(header);
+      }
+    }
+    if (columnNames.length) parts.push('column=' + JSON.stringify(columnNames.join(' | ')));
+    return parts;
+  }
   function attrs(el) {
     const parts = [];
     if (el.id) parts.push('id="' + el.id + '"');
@@ -786,6 +834,16 @@ const DOM_SNAPSHOT_SCRIPT = `(vw, vh) => {
     if (el.placeholder) parts.push('placeholder="' + el.placeholder + '"');
     if (el.getAttribute('aria-label')) parts.push('aria-label="' + el.getAttribute('aria-label') + '"');
     if (el.getAttribute('role')) parts.push('role="' + el.getAttribute('role') + '"');
+    const label = name(el);
+    if (label) parts.push('label=' + JSON.stringify(label));
+    for (const attr of ['aria-checked','aria-selected','aria-expanded','aria-disabled','aria-multiselectable','aria-haspopup','aria-controls','aria-activedescendant']) {
+      const value = el.getAttribute(attr);
+      if (value !== null) parts.push(attr + '=' + JSON.stringify(value.slice(0, 200)));
+    }
+    const group = el.closest('fieldset, [role="radiogroup"], [role="group"]');
+    const groupLabel = name(group) || (group?.tagName === 'FIELDSET' ? cellText(group.querySelector('legend')) : '');
+    if (groupLabel) parts.push('group=' + JSON.stringify(groupLabel));
+    parts.push(...matrixContext(el));
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
       const v = el.value || '';
       parts.push('value="' + v.slice(0, 200) + '"');
@@ -793,9 +851,13 @@ const DOM_SNAPSHOT_SCRIPT = `(vw, vh) => {
     if (el.tagName === 'SELECT') {
       const opt = el.options[el.selectedIndex];
       if (opt) parts.push('selected="' + opt.text + '"');
+      if (el.multiple) parts.push('multiple');
     }
-    if (el.checked !== undefined) parts.push(el.checked ? 'checked' : 'unchecked');
-    if (el.disabled) parts.push('disabled');
+    const control = el.tagName === 'LABEL' ? el.control : el;
+    if (control?.checked !== undefined) parts.push(control.checked ? 'checked' : 'unchecked');
+    if (control?.disabled || control?.matches(':disabled')) parts.push('disabled');
+    if (['IMG','CANVAS'].includes(el.tagName) || el.querySelector('img, canvas') || Array.from(el.labels || []).some(label => label.querySelector('img, canvas'))) parts.push('visual-choice');
+    if (el.tagName === 'IMG' && el.alt) parts.push('alt=' + JSON.stringify(el.alt.slice(0, 200)));
     if (el.readOnly) parts.push('readonly');
     parts.push('tabindex="' + el.tabIndex + '"');
     if (el === document.activeElement) parts.push('focused');
@@ -822,7 +884,17 @@ const DOM_SNAPSHOT_SCRIPT = `(vw, vh) => {
     const a = attrs(el);
     const t = text(el);
     const label = t ? ' "' + t.slice(0, 200) + '"' : '';
-    return pad + '[' + ref + '] ' + el.tagName.toLowerCase() + (a ? ' ' + a : '') + label + coords(el);
+    let line = pad + '[' + ref + '] ' + el.tagName.toLowerCase() + (a ? ' ' + a : '') + label + coords(el);
+    if (el.tagName === 'SELECT') {
+      for (const [index, option] of Array.from(el.options).entries()) {
+        const group = option.parentElement?.tagName === 'OPTGROUP' ? option.parentElement : null;
+        line += '\\n' + pad + '  option index=' + index + ' value=' + JSON.stringify(option.value)
+          + ' label=' + JSON.stringify(option.label || option.text)
+          + (group ? ' group=' + JSON.stringify(group.label) : '')
+          + (option.selected ? ' selected' : '') + (option.disabled || group?.disabled || el.disabled ? ' disabled' : '');
+      }
+    }
+    return line;
   }
   function walk(el, depth) {
     if (!el || el.nodeType !== 1) return;
@@ -839,11 +911,14 @@ const DOM_SNAPSHOT_SCRIPT = `(vw, vh) => {
     const tagLower = tag.toLowerCase();
     if (isI) {
       lines.push(refLine(el, refs.get(el), pad));
+      if (tag === 'SELECT') return;
     } else if (['H1','H2','H3','H4','H5','H6'].includes(tag)) {
       lines.push(pad + tagLower + ': ' + t);
     } else if (tag === 'IMG') {
       const alt = el.alt || el.getAttribute('aria-label') || '';
-      lines.push(pad + '[img' + (alt ? ' alt="' + alt + '"' : '') + ']');
+      lines.push(pad + '[img' + (alt ? ' alt="' + alt + '"' : ' visual-only') + ']' + coords(el));
+    } else if (tag === 'CANVAS') {
+      lines.push(pad + '[canvas visual-only]' + coords(el));
     } else if (tag === 'TABLE') {
       lines.push(pad + '[table]');
     } else if (tag === 'TR') {

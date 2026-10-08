@@ -119,6 +119,17 @@ Supported action types are `click`, `double_click`, `move`, `type`, `keypress`, 
 
 Batch up to the point where navigation, scrolling, a popup, or a layout change requires new page information; Next/Submit should be the last action. Coordinate targets must stay in place across earlier steps. The observation is checked once at the start, and its mapping is reused without intermediate snapshots. A local context check stops later inputs if the tab navigates, changes, or resizes. `timeoutMs` controls the final transition wait; the RPC budget separately accounts for human typing, dwell times, and explicit waits. Failed actions stop the queue and return `completedActions`, prior results, and a zero-based `failedActionIndex`, so an agent can inspect the page before continuing. A failed transition wait also reports failure.
 
+### Complex form controls
+
+Snapshots expose control labels, group names, and selection states so the agent can identify choices before acting:
+
+- Native dropdowns list each option's index, value, label, selected state, and disabled state, including option groups. Focus the select and use arrow keys or type-ahead, then check a fresh snapshot to verify the selection. Disabled options may be skipped by keyboard navigation.
+- Custom dropdowns expose ARIA expanded, selected, and checked states when the page provides them. Open the dropdown, take another snapshot, and choose from the revealed options.
+- Matrix controls in HTML tables and ARIA grids include row and column headers where the markup supplies them. Match both headers before clicking, then verify the checked or selected state.
+- Image choices are marked `visual-choice`; images and canvases include their screen positions. Visible labels for hidden radio/checkbox inputs receive clickable refs. When a choice depends on the picture, use `browser_observe` or `browser_inspect`, select the identified target, and verify its state.
+
+These descriptions depend on the page's markup. Use screenshots when a custom widget lacks useful labels or table structure, and inspect the result before advancing.
+
 ## Two connection modes
 
 ### Local mode
