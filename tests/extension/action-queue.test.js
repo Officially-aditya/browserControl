@@ -81,6 +81,53 @@ describe("extension action queue", () => {
     expect(h.snapshot).toHaveBeenCalledOnce();
   });
 
+  it.each(["min", "max"])("queues a known dropdown choice with %s default gaps and one final snapshot", async (edge) => {
+    const order = [];
+    let opened = false;
+    let selected = false;
+    const h = queueHarness({
+      randomBetween: vi.fn((min, max) => edge === "min" ? min : max),
+      sleep: vi.fn(async (ms) => { order.push(ms); }),
+      clickElement: vi.fn(async ({ text }) => {
+        if (text === "City") opened = true;
+        else if (text === "Bangalore" && opened) selected = true;
+        else if (text !== "Continue" || !selected) throw new Error("Target unavailable");
+        order.push(text);
+        return { success: true };
+      }),
+      snapshot: vi.fn(async () => {
+        order.push("snapshot");
+        return { observationId: "next", dom: "next page" };
+      }),
+    });
+    const result = await h.run({
+      queue: [
+        { type: "click", target: { text: "City" } },
+        { type: "click", target: { text: "Bangalore" } },
+        { type: "click", target: { text: "Continue" } },
+      ],
+      waitForIdle: false,
+    });
+    const gap = edge === "min" ? 50 : 100;
+    expect(result).toMatchObject({ success: true, completedActions: 3, observationId: "next" });
+    expect(order).toEqual(["City", gap, "Bangalore", gap, "Continue", 100, "snapshot"]);
+    expect(h.randomBetween.mock.calls).toEqual([[50, 100], [50, 100]]);
+    expect(h.snapshot).toHaveBeenCalledOnce();
+  });
+
+  it.each([0, 75, 1000])("honors an exact dwellMs of %i without jitter", async (dwellMs) => {
+    const h = queueHarness({ randomBetween: vi.fn(() => 100) });
+    await h.run({
+      queue: [
+        { type: "click", target: { text: "City" }, dwellMs },
+        { type: "click", target: { text: "Bangalore" }, dwellMs: 0 },
+      ],
+      waitForIdle: false,
+    });
+    expect(h.sleep.mock.calls).toEqual(dwellMs === 0 ? [[100]] : [[dwellMs], [100]]);
+    expect(h.randomBetween).not.toHaveBeenCalled();
+  });
+
   it("resolves a queued typing target by its placeholder or label text", async () => {
     const h = queueHarness({}, true);
     await h.run({

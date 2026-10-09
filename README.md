@@ -115,6 +115,22 @@ Take one `browser_snapshot`, prepare the known mouse and keyboard steps, then ex
 }
 ```
 
+The default pause between actions is a random 50–100 ms. Set an action's `dwellMs` for an exact pause, including `0` to skip it. There is no default pause after the last action; the final transition wait and snapshot settle still run.
+
+For a custom dropdown with a known option label, opening it, selecting Bangalore, and clicking Continue can all run in one LLM tool call. Each text target is resolved against the live page when its action runs, so the option can appear after the first click:
+
+```json
+{
+  "queue": [
+    { "type": "click", "target": { "text": "City" } },
+    { "type": "click", "target": { "text": "Bangalore" } },
+    { "type": "click", "target": { "text": "Continue" } }
+  ]
+}
+```
+
+If the options need discovery, open the dropdown and inspect a new snapshot before planning the remaining actions. For native selects, use the options listed in the snapshot to plan keyboard actions.
+
 Supported action types are `click`, `double_click`, `move`, `type`, `keypress`, `scroll`, and `wait`. DOM targets accept a snapshot `ref`, CSS `selector`, or `text`; for typing, target text matches the field's placeholder or label. Selectors or text are preferable when earlier actions change element order, because numeric refs can shift. Coordinate clicks and moves require the queue-level `observationId`. All coordinates use normalized 0–1000 values within that observation's source region, including crops from `browser_inspect`. Scroll positions default to 500/500; without an observation they use the full current viewport. Scroll deltas are CSS pixels. Offscreen elements are marked `[offscreen]` without click coordinates; DOM targeting can scroll them into view.
 
 Batch up to the point where navigation, scrolling, a popup, or a layout change requires new page information; Next/Submit should be the last action. Coordinate targets must stay in place across earlier steps. The observation is checked once at the start, and its mapping is reused without intermediate snapshots. A local context check stops later inputs if the tab navigates, changes, or resizes. `timeoutMs` controls the final transition wait; the RPC budget separately accounts for human typing, dwell times, and explicit waits. Failed actions stop the queue and return `completedActions`, prior results, and a zero-based `failedActionIndex`, so an agent can inspect the page before continuing. A failed transition wait also reports failure.
@@ -124,7 +140,7 @@ Batch up to the point where navigation, scrolling, a popup, or a layout change r
 Snapshots expose control labels, group names, and selection states so the agent can identify choices before acting:
 
 - Native dropdowns list each option's index, value, label, selected state, and disabled state, including option groups. Focus the select and use arrow keys or type-ahead, then check a fresh snapshot to verify the selection. Disabled options may be skipped by keyboard navigation.
-- Custom dropdowns expose ARIA expanded, selected, and checked states when the page provides them. Open the dropdown, take another snapshot, and choose from the revealed options.
+- Custom dropdowns expose ARIA expanded, selected, and checked states when the page provides them. When the desired option label or selector is known, queue opening the dropdown, selecting the option by its live target, and advancing. Take another snapshot after opening when the options need discovery.
 - Matrix controls in HTML tables and ARIA grids include row and column headers where the markup supplies them. Match both headers before clicking, then verify the checked or selected state.
 - Image choices are marked `visual-choice`; images and canvases include their screen positions. Visible labels for hidden radio/checkbox inputs receive clickable refs. When a choice depends on the picture, use `browser_observe` or `browser_inspect`, select the identified target, and verify its state.
 

@@ -1602,9 +1602,9 @@ async function executeActionQueue(params = {}) {
         results.push({ action: "wait", ms });
       }
 
-      // Natural inter-action dwell time between items (reading next row/question)
-      const dwell = item.dwellMs !== undefined ? Number(item.dwellMs) : (i < queue.length - 1 ? randomBetween(450, 950) : 0);
-      if (dwell > 0) await sleep(Math.max(0, dwell + randomBetween(-100, 100)));
+      // Brief natural pause between consecutive actions; explicit dwell times are exact.
+      const dwell = item.dwellMs !== undefined ? Number(item.dwellMs) : (i < queue.length - 1 ? randomBetween(50, 100) : 0);
+      if (dwell > 0) await sleep(dwell);
     } catch (error) {
       return {
         success: false,
