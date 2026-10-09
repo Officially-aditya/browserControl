@@ -11,7 +11,7 @@ import { createLocalConnection } from "./local-connection.js";
 import { keyDefinition, keyEvents } from "./keyboard.js";
 import { captureViewportScreenshot } from "./screenshot.js";
 import {
-  randomBetween, bezierPath, stepTimings,
+  randomBetween, gaussianRandom, bezierPath, stepTimings,
   preClickDelayMs, clickHoldMs, clickJitter,
   keyHoldMs, charFlightMs, wordPauseMs, shortcutHoldMs,
   scrollChunks, scrollStepDelayMs,
@@ -997,33 +997,70 @@ async function mouseMove(params) {
   return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
 
-/** Humanized press/hold/release at viewport CSS-pixel coordinates (shared by browser_click and queued clicks). */
-async function dispatchClick(x, y, button = "left", clickCount = 1) {
-  // 1. Move to target along Bézier curve
+const RANDOMIZED_CLICK_POINT_SCRIPT = `(x, y) => {
+  const hit = document.elementFromPoint(x, y);
+  if (hit?.closest('input[type="range"], [role="slider"], canvas')) return { x, y };
+  const selector = 'a[href], button, input, select, textarea, label, summary, [role="button"], [role="link"], [role="radio"], [role="checkbox"], [role="switch"], [role="option"], [role="tab"], [role="menuitem"], [role="combobox"], [onclick]';
+  const el = hit?.closest(selector);
+  if (!el) return { x, y };
+  const r = el.getBoundingClientRect();
+  const left = Math.max(0, r.left);
+  const top = Math.max(0, r.top);
+  const width = Math.min(innerWidth, r.right) - left;
+  const height = Math.min(innerHeight, r.bottom) - top;
+  if (width <= 0 || height <= 0) return { x, y };
+  const rect = { left, top, width, height };
+  const gaussianRandom = ${gaussianRandom.toString()};
+  const point = (${humanClickPoint.toString()})(rect);
+  // Keep the requested point if the sampled location hits another control or an overlay.
+  if (document.elementFromPoint(point.x, point.y)?.closest(selector) !== el) return { x, y };
+  return { ...point, rect };
+}`;
+
+/** Humanized press/hold/release shared by coordinate, element, and queued clicks. */
+async function dispatchClick(x, y, button = "left", clickCount = 1, rect = null) {
+  let point = { x, y };
+  if (rect) {
+    point = humanClickPoint(rect);
+  } else if (clickCount === 1) {
+    const result = await send("Runtime.evaluate", {
+      expression: `(${RANDOMIZED_CLICK_POINT_SCRIPT})(${x}, ${y})`,
+      returnByValue: true,
+    });
+    point = result?.result?.value || point;
+    rect = point.rect || null;
+  }
+  x = point.x;
+  y = point.y;
+
   await humanMouseMoveTo(x, y);
-
-  // 2. Pre-click hover delay
   await sleep(preClickDelayMs());
-
-  // 3. Press with hold duration
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
   await sleep(clickHoldMs());
 
-  // 4. Release with slight jitter
   const jitter = clickJitter();
+  let releaseX = x + jitter.dx;
+  let releaseY = y + jitter.dy;
+  if (rect) {
+    const left = rect.left ?? rect.x - rect.width / 2;
+    const top = rect.top ?? rect.y - rect.height / 2;
+    const insetX = Math.min(1, rect.width / 4);
+    const insetY = Math.min(1, rect.height / 4);
+    releaseX = Math.max(left + insetX, Math.min(left + rect.width - insetX, releaseX));
+    releaseY = Math.max(top + insetY, Math.min(top + rect.height - insetY, releaseY));
+  }
   await send("Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x: x + jitter.dx, y: y + jitter.dy,
-    button, clickCount,
+    type: "mouseReleased", x: releaseX, y: releaseY, button, clickCount,
   });
+  return { x: releaseX, y: releaseY };
 }
 
 async function mouseClick(params, clickCount = 1) {
   const record = assertFresh(params.observationId);
   const p = normalizedPointToSource(params.x, params.y, record);
-  await dispatchClick(p.x, p.y, params.button || "left", clickCount);
+  const clickedPoint = await dispatchClick(p.x, p.y, params.button || "left", clickCount);
 
-  setPointerFromRecordPoint(p, record, "agent");
+  setPointerFromRecordPoint(clickedPoint, record, "agent");
   invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
   return { success: true, visualEpoch, pointer: pointerMetadata() };
 }
@@ -1245,30 +1282,10 @@ async function resolveElement(params = {}) {
 
 async function clickElement(params = {}) {
   const rect = await resolveElement(params);
-
-  // Compute realistic human landing point across the element (never dead-center)
-  const clickPoint = humanClickPoint(rect);
-  const targetX = clickPoint.x;
-  const targetY = clickPoint.y;
-  const button = params.button || "left";
-  const clickCount = params.clickCount || 1;
-
-  await humanMouseMoveTo(targetX, targetY);
-  await sleep(preClickDelayMs());
-  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: targetX, y: targetY, button, clickCount });
-  await sleep(clickHoldMs());
-
-  const jitter = clickJitter();
-  await send("Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x: targetX + jitter.dx,
-    y: targetY + jitter.dy,
-    button,
-    clickCount,
-  });
+  const point = await dispatchClick(rect.x, rect.y, params.button || "left", params.clickCount || 1, rect);
 
   const vp = await viewport();
-  setPointerFromViewport(targetX, targetY, vp.width, vp.height, "agent");
+  setPointerFromViewport(point.x, point.y, vp.width, vp.height, "agent");
   invalidateVisualState("agent-click-element");
   return { success: true, visualEpoch, clicked: rect };
 }
@@ -1529,8 +1546,8 @@ async function executeActionQueue(params = {}) {
         const clickCount = type === "double_click" ? 2 : 1;
         if (usesPoint(item)) {
           const p = pointFor(item);
-          await dispatchClick(p.x, p.y, button, clickCount);
-          setPointerFromRecordPoint(p, record, "agent");
+          const clickedPoint = await dispatchClick(p.x, p.y, button, clickCount);
+          setPointerFromRecordPoint(clickedPoint, record, "agent");
           invalidateVisualState(clickCount === 2 ? "agent-double-click" : "agent-click");
           results.push({ action: type, x: item.x, y: item.y });
         } else {

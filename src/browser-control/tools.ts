@@ -94,7 +94,7 @@ export function browserTools(): Tool[] {
       },
     },
     { name: "browser_move", description: "Move/hover the logical browser pointer at normalized coordinates from a specific observation. The action updates pointer state for later status/observation calls.", inputSchema: { type: "object" as const, properties: POINT_PROPERTIES, required: ["observationId", "x", "y"], additionalProperties: false } },
-    { name: "browser_click", description: "Click at normalized coordinates from a specific observation and update the logical pointer position. Stale observations are rejected.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
+    { name: "browser_click", description: "Click at normalized coordinates from a specific observation. For standard DOM controls, the click point is randomized inside the same component's visible bounds. Updates the logical pointer to the actual click position. Stale observations are rejected.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
     { name: "browser_double_click", description: "Double-click at normalized coordinates from a specific observation and update the logical pointer position.", inputSchema: { type: "object" as const, properties: { ...POINT_PROPERTIES, button: { type: "string", enum: ["left", "right", "middle"], default: "left" } }, required: ["observationId", "x", "y"], additionalProperties: false } },
     {
       name: "browser_drag",
@@ -163,7 +163,7 @@ export function browserTools(): Tool[] {
     },
     {
       name: "browser_click_element",
-      description: "Click an interactive element resolved live in the page. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or visible 'text'. Resolves the element's live bounding rect at execution time, moves the mouse via natural Bézier curve, and clicks with humanized hold duration and jitter. Eliminates coordinate staleness. For multiple known clicks or form inputs, prefer browser_action_queue to separate tool calls.",
+      description: "Click an interactive element resolved live in the page. You can target the element using 'ref' (1-based index from browser_snapshot), CSS 'selector', or visible 'text'. Resolves the element's live bounding rect at execution time and randomizes the click point inside it, with humanized hold duration and bounded release jitter. Eliminates coordinate staleness. For multiple known clicks or form inputs, prefer browser_action_queue to separate tool calls.",
       inputSchema: {
         type: "object" as const,
         properties: {

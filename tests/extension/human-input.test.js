@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   randomBetween, gaussianRandom, keyHoldMs, charFlightMs, wordPauseMs,
   shortcutHoldMs, bezierPath, stepTimings, preClickDelayMs, clickHoldMs,
-  clickJitter, scrollChunks, scrollStepDelayMs, wordCount, minDwellMs,
+  clickJitter, humanClickPoint, scrollChunks, scrollStepDelayMs, wordCount, minDwellMs,
 } from "../../extension/human-input.js";
 
 describe("human-input timing helpers", () => {
@@ -78,6 +78,40 @@ describe("bezierPath", () => {
       expect(Number.isFinite(p.x)).toBe(true);
       expect(Number.isFinite(p.y)).toBe(true);
     }
+  });
+});
+
+describe("humanClickPoint", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([[200, 40], [12, 12], [2, 1], [0.5, 0.75]])(
+    "keeps randomized points strictly inside a %s by %s target",
+    (width, height) => {
+      const left = 10.3;
+      const top = 20.6;
+      const random = vi.spyOn(Math, "random");
+      for (const value of [0, 0.001, 0.25, 0.5, 0.999999]) {
+        random.mockReturnValue(value);
+        for (const rect of [
+          { left, top, width, height },
+          { x: left + width / 2, y: top + height / 2, width, height },
+        ]) {
+          const point = humanClickPoint(rect);
+          expect(point.x).toBeGreaterThan(left);
+          expect(point.x).toBeLessThan(left + width);
+          expect(point.y).toBeGreaterThan(top);
+          expect(point.y).toBeLessThan(top + height);
+        }
+      }
+    },
+  );
+
+  it("varies the landing point across the component", () => {
+    const rect = { left: 10, top: 20, width: 200, height: 40 };
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.2);
+    const first = humanClickPoint(rect);
+    random.mockReturnValue(0.8);
+    expect(humanClickPoint(rect)).not.toEqual(first);
   });
 });
 

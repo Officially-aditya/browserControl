@@ -107,12 +107,12 @@ export function humanClickPoint(rect) {
   const left = rect.left !== undefined ? rect.left : (rect.x - w / 2);
   const top = rect.top !== undefined ? rect.top : (rect.y - h / 2);
 
-  // Safe inner margin (at least 3px, or 10% of dimension)
-  const marginX = Math.min(12, Math.max(3, w * 0.12));
-  const marginY = Math.min(8, Math.max(3, h * 0.15));
+  // Scale the margin down for tiny controls so the safe area stays inside the target.
+  const marginX = Math.min(w / 4, 12, Math.max(3, w * 0.12));
+  const marginY = Math.min(h / 4, 8, Math.max(3, h * 0.15));
 
-  const safeW = Math.max(2, w - 2 * marginX);
-  const safeH = Math.max(2, h - 2 * marginY);
+  const safeW = w - 2 * marginX;
+  const safeH = h - 2 * marginY;
 
   // Horizontal: For wider buttons or text labels, people tend to click slightly left of center
   // (where reading starts) with a natural standard deviation
@@ -125,8 +125,8 @@ export function humanClickPoint(rect) {
   const clampedY = Math.max(0, Math.min(safeH, targetRelY));
 
   return {
-    x: Math.round(left + marginX + clampedX),
-    y: Math.round(top + marginY + clampedY),
+    x: Math.max(left + marginX, Math.min(left + w - marginX, Math.round(left + marginX + clampedX))),
+    y: Math.max(top + marginY, Math.min(top + h - marginY, Math.round(top + marginY + clampedY))),
   };
 }
 

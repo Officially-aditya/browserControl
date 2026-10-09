@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { gaussianRandom, humanClickPoint } from "../../extension/human-input.js";
 
 const source = ts.createSourceFile(
   "service-worker.js",
@@ -17,8 +18,17 @@ function functionSource(name) {
   return statement.getText(source);
 }
 
+const clickPointDeclaration = source.statements
+  .filter(ts.isVariableStatement)
+  .flatMap((node) => [...node.declarationList.declarations])
+  .find((node) => node.name.getText(source) === "RANDOMIZED_CLICK_POINT_SCRIPT");
+const clickPointScript = new Function(
+  "gaussianRandom", "humanClickPoint",
+  `return ${clickPointDeclaration.initializer.getText(source)};`,
+)(gaussianRandom, humanClickPoint);
+
 // Exercise the real extension queue with browser I/O and human delays stubbed.
-function queueHarness(overrides = {}, realTyping = false) {
+function queueHarness(overrides = {}, realTyping = false, realClicks = false) {
   const dependencies = {
     clickElement: vi.fn(async () => ({ success: true })),
     typeElement: vi.fn(async () => ({ success: true })),
@@ -36,7 +46,13 @@ function queueHarness(overrides = {}, realTyping = false) {
     ensureAttached: vi.fn(async () => 1),
     humanTypeText: vi.fn(async () => {}),
     humanMouseMoveTo: vi.fn(async () => {}),
-    dispatchClick: vi.fn(async () => {}),
+    dispatchClick: vi.fn(async (x, y) => ({ x, y })),
+    RANDOMIZED_CLICK_POINT_SCRIPT: clickPointScript,
+    humanClickPoint,
+    preClickDelayMs: () => 0,
+    clickHoldMs: () => 0,
+    clickJitter: () => ({ dx: 0, dy: 0 }),
+    pointerMetadata: () => ({ known: true }),
     dispatchKeys: vi.fn(async () => {}),
     resolveElement: vi.fn(async () => ({ x: 100, y: 100, width: 50, height: 20 })),
     assertFresh: vi.fn(() => ({
@@ -56,11 +72,117 @@ function queueHarness(overrides = {}, realTyping = false) {
     ...Object.keys(dependencies),
     functionSource("normalizedPointToSource") +
       (realTyping ? functionSource("typeElement") : "") +
+      (realClicks ? functionSource("dispatchClick") + functionSource("mouseClick") + functionSource("clickElement") : "") +
       functionSource("executeActionQueue") +
-      "; return { run: executeActionQueue, changeContext: () => controlContextEpoch++, changeTab: (id) => attachedTabId = id };",
+      `; return { run: executeActionQueue, ${realClicks ? "click: mouseClick, element: clickElement," : ""} changeContext: () => controlContextEpoch++, changeTab: (id) => attachedTabId = id };`,
   )(...Object.values(dependencies));
   return { ...run, ...dependencies };
 }
+
+describe("randomized clicks", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function browserSend(document) {
+    return vi.fn(async (method, params) => {
+      if (method !== "Runtime.evaluate") return {};
+      const value = new Function("document", "innerWidth", "innerHeight", `return ${params.expression};`)(
+        document, 1400, 800,
+      );
+      return { result: { value } };
+    });
+  }
+
+  function control(rect) {
+    const el = {
+      closest: (selector) => selector.startsWith("input[") ? null : el,
+      getBoundingClientRect: () => rect,
+    };
+    return el;
+  }
+
+  it.each(["standalone", "queue"])("randomizes a %s coordinate click and reports its actual pointer", async (mode) => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const el = control({ left: 600, top: 180, right: 800, bottom: 220 });
+    const send = browserSend({ elementFromPoint: () => el });
+    const h = queueHarness({ send }, false, true);
+    if (mode === "standalone") {
+      await h.click({ observationId: "obs-1", x: 500, y: 250, button: "right" });
+    } else {
+      await h.run({
+        observationId: "obs-1",
+        queue: [{ type: "click", x: 500, y: 250, button: "right" }],
+        waitForIdle: false,
+      });
+    }
+    const press = send.mock.calls.find(([, p]) => p.type === "mousePressed")[1];
+    expect(press).toMatchObject({ button: "right", clickCount: 1 });
+    expect({ x: press.x, y: press.y }).not.toEqual({ x: 700, y: 200 });
+    expect(press.x).toBeGreaterThan(600);
+    expect(press.x).toBeLessThan(800);
+    expect(press.y).toBeGreaterThan(180);
+    expect(press.y).toBeLessThan(220);
+    expect(h.setPointerFromRecordPoint).toHaveBeenCalledWith(
+      { x: press.x, y: press.y }, expect.objectContaining({ tabId: 1 }), "agent",
+    );
+    if (mode === "queue") expect(h.snapshot).toHaveBeenCalledOnce();
+  });
+
+  it.each(["empty", "overlay", "precise control"])("preserves coordinates for %s", async (kind) => {
+    const el = control({ left: 600, top: 180, right: 800, bottom: 220 });
+    const overlay = { closest: () => null };
+    const elementFromPoint = vi.fn()
+      .mockReturnValueOnce(kind === "empty" ? null : kind === "precise control" ? { closest: () => el } : el)
+      .mockReturnValue(overlay);
+    const send = browserSend({ elementFromPoint });
+    const h = queueHarness({ send }, false, true);
+    await h.click({ observationId: "obs-1", x: 500, y: 250 });
+    expect(send).toHaveBeenCalledWith("Input.dispatchMouseEvent", {
+      type: "mousePressed", x: 700, y: 200, button: "left", clickCount: 1,
+    });
+  });
+
+  it("samples only the visible part of a partially clipped component", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const el = control({ left: -100, top: -50, right: 100, bottom: 20 });
+    const send = browserSend({ elementFromPoint: () => el });
+    const h = queueHarness({ send }, false, true);
+    await h.click({ observationId: "obs-1", x: 0, y: 10 });
+    const press = send.mock.calls.find(([, p]) => p.type === "mousePressed")[1];
+    expect(press.x).toBeGreaterThan(0);
+    expect(press.x).toBeLessThan(100);
+    expect(press.y).toBeGreaterThan(0);
+    expect(press.y).toBeLessThan(20);
+  });
+
+  it.each([-2, 2])("keeps press and release inside tiny element targets with %i jitter", async (offset) => {
+    vi.spyOn(Math, "random").mockReturnValue(0.001);
+    const rect = { x: 10.8, y: 20.975, width: 1, height: 0.75 };
+    const h = queueHarness({
+      resolveElement: vi.fn(async () => rect),
+      clickJitter: () => ({ dx: offset, dy: offset }),
+    }, false, true);
+    await h.element({ selector: "#tiny" });
+    const events = h.send.mock.calls.filter(([method]) => method === "Input.dispatchMouseEvent");
+    expect(events).toHaveLength(2);
+    for (const [, event] of events) {
+      expect(event.x).toBeGreaterThan(10.3);
+      expect(event.x).toBeLessThan(11.3);
+      expect(event.y).toBeGreaterThan(20.6);
+      expect(event.y).toBeLessThan(21.35);
+    }
+    const release = events[1][1];
+    expect(h.setPointerFromViewport).toHaveBeenCalledWith(release.x, release.y, 1400, 800, "agent");
+  });
+
+  it("keeps coordinate double-clicks precise for text selection", async () => {
+    const h = queueHarness({}, false, true);
+    await h.click({ observationId: "obs-1", x: 500, y: 250 }, 2);
+    expect(h.send).toHaveBeenCalledWith("Input.dispatchMouseEvent", {
+      type: "mousePressed", x: 700, y: 200, button: "left", clickCount: 2,
+    });
+    expect(h.send.mock.calls.some(([method]) => method === "Runtime.evaluate")).toBe(false);
+  });
+});
 
 describe("extension action queue", () => {
   it("executes actions in order and returns the final snapshot", async () => {
@@ -176,7 +298,10 @@ describe("extension action queue", () => {
 
   it.each(["changeContext", "changeTab"])("stops later inputs when %s occurs in the same batch", async (change) => {
     const h = queueHarness();
-    h.dispatchClick.mockImplementation(async () => h[change](2));
+    h.dispatchClick.mockImplementation(async (x, y) => {
+      h[change](2);
+      return { x, y };
+    });
     const result = await h.run({
       observationId: "obs-1",
       queue: [
