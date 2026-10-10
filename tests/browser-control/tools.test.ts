@@ -45,8 +45,52 @@ describe("canonical browserControl tools", () => {
       "browser_wait_for",
       "browser_select_and_advance",
       "browser_action_queue",
+      "browser_set_profile",
+      "browser_fill_profile",
       "browser_release_control",
     ]);
+  });
+
+
+  it("routes profile tools with a trusted per-client session and sufficient fill time", async () => {
+    const route = fakeRoute();
+    await handleBrowserToolCall(route, "client-a", "browser_set_profile", { values: { pincode: "001234" }, profileSession: "forged" });
+    await handleBrowserToolCall(route, "client-a", "browser_fill_profile", {});
+    expect(route.bridge.call).toHaveBeenNthCalledWith(1, "set_profile", { values: { pincode: "001234" }, profileSession: "client-a" });
+    expect(route.bridge.call).toHaveBeenNthCalledWith(2, "fill_profile", { profileSession: "client-a" }, 150000);
+  });
+
+  it("rejects malformed profile payloads and fill limits before the extension", async () => {
+    const route = fakeRoute();
+    for (const [name, args] of [
+      ["browser_set_profile", { values: [] }],
+      ["browser_set_profile", { values: { city: "x".repeat(65536) } }],
+      ["browser_fill_profile", { maxFields: 0 }],
+      ["browser_fill_profile", { timeoutMs: 180001 }],
+    ] as const) {
+      expect((await handleBrowserToolCall(route, "client-a", name, args)).isError).toBe(true);
+    }
+    expect(route.bridge.call).not.toHaveBeenCalled();
+  });
+
+  it("keeps the profile fill lease alive and returns partial failures as tool errors", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: any) => void;
+    const route = fakeRoute(() => new Promise(resolve => { finish = resolve; }));
+    const running = handleBrowserToolCall(route, "client-a", "browser_fill_profile", {});
+    try {
+      await vi.advanceTimersByTimeAsync(65000);
+      expect((await handleBrowserToolCall(route, "client-b", "browser_fill_profile", {})).isError).toBe(true);
+      finish({ success: false, filled: [{ key: "age" }], remaining: [{ key: "city", reason: "verification_failed" }] });
+      const result = await running;
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).filled).toEqual([{ key: "age" }]);
+    } finally {
+      finish({ success: true });
+      await running;
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    }
   });
 
   it("gives queued typing and dwell times enough RPC time to finish", async () => {

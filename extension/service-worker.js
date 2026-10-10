@@ -9,6 +9,7 @@ import {
 } from "./gateway-connection.js";
 import { createLocalConnection } from "./local-connection.js";
 import { keyDefinition, keyEvents } from "./keyboard.js";
+import { normalizeProfileMap, parseProfileDate, readProfileControls, profileTarget, fillProfileFields } from "./profile-map.js";
 import { captureViewportScreenshot } from "./screenshot.js";
 import {
   randomBetween, gaussianRandom, bezierPath, stepTimings,
@@ -51,6 +52,8 @@ const MUTATING_RPC_METHODS = new Set([
   "type_element",
   "select_and_advance",
   "action_queue",
+  "set_profile",
+  "fill_profile",
 ]);
 const CONTROL_SURFACE_HOSTS = new Set([
   "claude.ai",
@@ -1125,9 +1128,10 @@ async function scroll(params) {
 }
 
 
-async function humanTypeText(text) {
+async function humanTypeText(text, beforeCharacter = null) {
   const chars = Array.from(text);
   for (let i = 0; i < chars.length; i++) {
+    if (beforeCharacter) beforeCharacter();
     const char = chars[i];
     if (char === "\n" || char === "\r") {
       const events = keyEvents(["Enter"]);
@@ -1654,6 +1658,89 @@ async function executeActionQueue(params = {}) {
   };
 }
 
+
+const profileMaps = new Map();
+
+function setProfile(params, source) {
+  const profile = normalizeProfileMap(params);
+  const session = source + ':' + (params.profileSession || 'direct');
+  if (Object.keys(profile.values).length) profileMaps.set(session, profile);
+  else profileMaps.delete(session);
+  return { success: true, facts: Object.keys(profile.values).length, cleared: !Object.keys(profile.values).length };
+}
+
+async function fillProfile(params, source) {
+  const profile = profileMaps.get(source + ':' + (params.profileSession || 'direct'));
+  if (!profile) throw Object.assign(new Error('Set a profile map with browser_set_profile first'), { code: 'PROFILE_NOT_SET' });
+  const maxFields = params.maxFields ?? 50, timeoutMs = params.timeoutMs ?? 120000;
+  if (!Number.isInteger(maxFields) || maxFields < 1 || maxFields > 50
+    || !Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 180000) throw new Error('Invalid profile fill limits');
+  await ensureAttached();
+  const tabId = attachedTabId, contextEpoch = controlContextEpoch, startedAt = Date.now();
+  const checkContext = () => {
+    if (Date.now() - startedAt >= timeoutMs) throw Object.assign(new Error('Profile fill timed out'), { code: 'PROFILE_TIMEOUT' });
+    if (paused) throw Object.assign(new Error('CONTROL_PAUSED_BY_USER'), { code: 'CONTROL_PAUSED' });
+    if (attachedTabId !== tabId || controlContextEpoch !== contextEpoch) {
+      throw Object.assign(new Error('Tab, navigation, or viewport changed during profile filling'), { code: 'STALE_OBSERVATION' });
+    }
+  };
+  const evaluate = async expression => {
+    checkContext();
+    const result = await send('Runtime.evaluate', { expression, returnByValue: true });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || 'Profile page script failed');
+    checkContext();
+    return result.result?.value;
+  };
+  const key = async keys => { checkContext(); await dispatchKeys(keys); };
+  const io = {
+    read: () => evaluate('(() => {' + ELEMENT_INDEX_HELPERS + 'return (' + readProfileControls.toString() + ')();})()'),
+    sleep,
+    escape: () => key(['Escape']),
+    act: async plan => {
+      checkContext();
+      const focus = ['type', 'date', 'select'].includes(plan.kind);
+      const rect = await evaluate('(' + profileTarget.toString() + ')(' + JSON.stringify(plan.control.token) + ', ' + focus + ')');
+      if (plan.kind === 'select') {
+        const enabled = plan.control.options.filter(option => !option.disabled);
+        const index = enabled.findIndex(option => option.index === plan.option.index);
+        const fromEnd = enabled.length - 1 - index < index;
+        await key([fromEnd ? 'End' : 'Home']);
+        for (let i = 0, count = fromEnd ? enabled.length - 1 - index : index; i < count; i++) {
+          await key([fromEnd ? 'ArrowUp' : 'ArrowDown']);
+        }
+        await key(['Tab']);
+      } else if (plan.kind === 'date') {
+        const date = parseProfileDate(plan.answer);
+        for (const [index, part] of rect.dateOrder.entries()) {
+          // Numeric entry may advance a segment automatically. Re-establish its position each time.
+          for (let i = 0; i < 3; i++) await key(['ArrowLeft']);
+          for (let i = 0; i < index; i++) await key(['ArrowRight']);
+          for (const digit of String(date[part])) await key([digit]);
+        }
+        await key(['Tab']);
+      } else if (plan.kind === 'type') {
+        await key(['Control', 'a']);
+        await key(['Backspace']);
+        await humanTypeText(String(plan.answer), checkContext);
+        if (!plan.search) await key(['Tab']);
+      } else {
+        const target = plan.kind === 'option'
+          ? await evaluate('(' + profileTarget.toString() + ')(' + JSON.stringify(plan.option.token) + ')') : rect;
+        if (target.width <= 0 || target.height <= 0) throw new Error('Profile target is not visible');
+        const point = await dispatchClick(target.x, target.y, 'left', 1, target);
+        const vp = await viewport();
+        setPointerFromViewport(point.x, point.y, vp.width, vp.height, 'agent');
+      }
+      invalidateVisualState('agent-profile-fill');
+      checkContext();
+    },
+  };
+  const result = await fillProfileFields(profile, io, { maxFields, timeoutMs });
+  // Keep partial progress if navigation, user pause, or detach prevents a final snapshot.
+  if (paused || attachedTabId !== tabId || controlContextEpoch !== contextEpoch) return { ...result, visualEpoch };
+  return { ...result, ...await snapshot() };
+}
+
 async function evaluateScript(params = {}) {
   const expression = String(params.expression || "").trim();
   if (!expression) throw new Error("expression is required");
@@ -1873,12 +1960,14 @@ async function handleRpc(request, source = "remote") {
     case "type_element": return typeElement(request.params || {});
     case "wait_for": return waitFor(request.params || {});
     case "select_and_advance": return selectAndAdvance(request.params || {});
+    case "set_profile": return setProfile(request.params || {}, source);
+    case "fill_profile":
     case "action_queue": {
       const keepLease = setInterval(() => {
         if (transportLeaseOwner === source) transportLeaseExpiresAt = Date.now() + TRANSPORT_LEASE_MS;
       }, 10_000);
       try {
-        return await executeActionQueue(request.params || {});
+        return await (request.method === "fill_profile" ? fillProfile(request.params || {}, source) : executeActionQueue(request.params || {}));
       } finally {
         clearInterval(keepLease);
       }

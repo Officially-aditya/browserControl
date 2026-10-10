@@ -90,7 +90,8 @@ export async function startLocalExtensionServer(
               effectiveParams.observationId = lastObservation.observationId;
             }
           }
-          const timeoutMs = method === "action_queue" ? actionQueueTimeoutMs(effectiveParams) : undefined;
+          const timeoutMs = method === "fill_profile" ? (effectiveParams.timeoutMs ?? 120000) + 30000
+            : method === "action_queue" ? actionQueueTimeoutMs(effectiveParams) : undefined;
           const result = await bridge.call(method as any, effectiveParams, timeoutMs);
           if (result && (result as any).observationId) {
             lastObservation = {

@@ -80,6 +80,8 @@ browser_switch_tab
 browser_new_tab
 browser_close_tab
 browser_handle_dialog
+browser_set_profile
+browser_fill_profile
 browser_release_control
 ```
 
@@ -134,6 +136,49 @@ If the options need discovery, open the dropdown and inspect a new snapshot befo
 Supported action types are `click`, `double_click`, `move`, `type`, `keypress`, `scroll`, and `wait`. DOM targets accept a snapshot `ref`, CSS `selector`, or `text`; for typing, target text matches the field's placeholder or label. Selectors or text are preferable when earlier actions change element order, because numeric refs can shift. Coordinate clicks and moves require the queue-level `observationId`. All coordinates use normalized 0–1000 values within that observation's source region, including crops from `browser_inspect`. Scroll positions default to 500/500; without an observation they use the full current viewport. Scroll deltas are CSS pixels. Offscreen elements are marked `[offscreen]` without click coordinates; DOM targeting can scroll them into view.
 
 Batch up to the point where navigation, scrolling, a popup, or a layout change requires new page information; Next/Submit should be the last action. Coordinate targets must stay in place across earlier steps. The observation is checked once at the start, and its mapping is reused without intermediate snapshots. A local context check stops later inputs if the tab navigates, changes, or resizes. `timeoutMs` controls the final transition wait; the RPC budget separately accounts for human typing, dwell times, and explicit waits. Failed actions stop the queue and return `completedActions`, prior results, and a zero-based `failedActionIndex`, so an agent can inspect the page before continuing. A failed transition wait also reports failure.
+
+### Agent-created profile maps
+
+Use browser_set_profile once to supply known facts and question aliases, then call browser_fill_profile on each page that contains profile questions. Both local and remote MCP clients use the same tools. The extension reads the live controls and fills supported matches with the existing humanized keyboard and mouse input. It never clicks Next or Submit.
+
+For example, pass this map to browser_set_profile:
+
+```json
+{
+  "values": {
+    "date_of_birth": "1998-04-12",
+    "country": "India",
+    "state": "Maharashtra",
+    "city": "Pune",
+    "pincode": "411001",
+    "is_primary_earner": true,
+    "highest_education": "Bachelor's degree",
+    "languages": ["English", "Hindi"]
+  },
+  "aliases": {
+    "When were you born?": "date_of_birth",
+    "Where do you currently live?": "city",
+    "Are you the main income earner in your household?": "is_primary_earner",
+    "What is your highest completed qualification?": "highest_education",
+    "Which languages do you speak?": "languages"
+  },
+  "optionAliases": {
+    "highest_education": {
+      "Completed bachelor's degree": "Bachelor's degree"
+    }
+  }
+}
+```
+
+Then call browser_fill_profile with {}. The map holds facts, rather than cached control types or option indices. Common field names are recognized; question aliases match after normalizing case, spacing, and punctuation. Supply explicit aliases for other wording. optionAliases maps displayed labels to equivalent stored values; the extension does not guess education equivalences, income definitions, or who a question refers to.
+
+Supported patterns include text/number fields; native dropdowns; labeled native/ARIA radio, checkbox and switch controls; ARIA custom dropdowns with identifiable listboxes and options; age numbers and unambiguous brackets; and DOB in a native date input, a text input with an explicit DD/MM/YYYY, MM/DD/YYYY, or YYYY-MM-DD format, or a labeled day/month/year group mixing inputs and dropdowns. Month options may use names, abbreviations, or numeric labels, regardless of their submitted values. Split dates are entered year, month, then day. Age is calculated on the fill date when DOB is supplied and age is absent. Country, state, city, and pincode fields are processed in that order, with controls and options refreshed after every answer.
+
+Boolean facts work with yes/no options or individual checkboxes. Arrays specify the selected set for checkbox groups. Keep postal codes as strings to preserve leading zeroes. Questions about a spouse, child, or other household member need their own contextual aliases and facts.
+
+Results include filled, alreadyFilled, and remaining with reasons such as map_miss, no_unique_option, unknown_date_format, or verification_failed, plus a new DOM snapshot. Previously filled answers are verified again after dependent fields change. Unlabeled widgets, ambiguous date formats, custom calendar-only pickers, frames, and shadow-root controls fall back to the agent's usual tools. A user pause or navigation stops filling and preserves partial results. Limit a call with maxFields (1–50) or timeoutMs (1–180 seconds).
+
+Maps are isolated by MCP session and transport, kept only in extension memory, and replaced by each browser_set_profile call. Clear a map with {"values":{}}. A service-worker restart clears all maps, so set the map again if the tool reports PROFILE_NOT_SET. Page discovery receives no profile facts. Run the optional live Chrome canary with `TEST_PROFILE_CHROME=1 npx vitest run tests/integration/profile-map.integration.test.js`.
 
 ### Complex form controls
 

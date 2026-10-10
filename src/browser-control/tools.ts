@@ -297,6 +297,41 @@ export function browserTools(): Tool[] {
         additionalProperties: false,
       },
     },
+    {
+      name: "browser_set_profile",
+      description: "Set an agent-created profile hashmap for this MCP session. Supply facts in values (DOB as YYYY-MM-DD, pincodes as strings), exact question-to-fact aliases, and optional per-fact optionAliases mapping displayed option labels to equivalent fact values. The extension discovers controls at fill time; do not encode control types in the map. Replaces the previous map; empty values clears it. Maps stay in extension memory until cleared or the service worker restarts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          values: { type: "object", maxProperties: 100, additionalProperties: { oneOf: [
+            { type: "string", maxLength: 500 }, { type: "number" }, { type: "boolean" },
+            { type: "array", maxItems: 50, items: { oneOf: [
+              { type: "string", maxLength: 500 }, { type: "number" }, { type: "boolean" },
+            ] } },
+          ] } },
+          aliases: { type: "object", maxProperties: 500, additionalProperties: { type: "string", maxLength: 200 } },
+          optionAliases: { type: "object", maxProperties: 100, additionalProperties: {
+            type: "object", maxProperties: 100, additionalProperties: { oneOf: [
+              { type: "string", maxLength: 500 }, { type: "number" }, { type: "boolean" },
+            ] },
+          } },
+        },
+        required: ["values"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser_fill_profile",
+      description: "Fill known profile questions on the current page using this session's map and natural keyboard/mouse input. Discovers text fields, mixed day/month/year DOB groups, formatted/native dates, native/ARIA dropdowns, radio and checkbox groups, age brackets and dependent location fields. Derives age from DOB when age is absent. Re-reads after each change and verifies committed values. Returns filled, alreadyFilled, remaining reasons and a fresh snapshot; misses or ambiguous/unsupported controls remain for normal agent handling. Does not submit or advance the form. Use browser_set_profile first.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          maxFields: { type: "integer", minimum: 1, maximum: 50, default: 50 },
+          timeoutMs: { type: "integer", minimum: 1000, maximum: 180000, default: 120000 },
+        },
+        additionalProperties: false,
+      },
+    },
     { name: "browser_release_control", description: "Release this MCP client's exclusive interactive-control lease for the browserControl device.", inputSchema: EMPTY_SCHEMA },
   ];
 }
@@ -327,6 +362,17 @@ function assertAllowedCall(method: string, args: Record<string, any>): Record<st
   } else if (method === "type" || method === "type_element") {
     if (typeof next.text === "string" && next.text.length > 5000) {
       throw Object.assign(new Error("type text must be at most 5000 characters"), { code: "INPUT_TOO_LARGE" });
+    }
+  } else if (method === "set_profile") {
+    if (!next.values || typeof next.values !== "object" || Array.isArray(next.values)
+      || JSON.stringify(next).length > 65536) {
+      throw Object.assign(new Error("values must be a profile object within 64 KiB"), { code: "INVALID_PROFILE" });
+    }
+  } else if (method === "fill_profile") {
+    for (const [field, minimum, maximum] of [["maxFields", 1, 50], ["timeoutMs", 1000, 180000]] as const) {
+      if (next[field] !== undefined && (!Number.isInteger(next[field]) || next[field] < minimum || next[field] > maximum)) {
+        throw Object.assign(new Error(field + " is outside the allowed profile fill limits"), { code: "INVALID_PARAM" });
+      }
     }
   } else if (method === "action_queue") {
     if (!Array.isArray(next.queue) || next.queue.length === 0) {
@@ -428,8 +474,9 @@ export async function handleBrowserToolCall(
     if (!route.lease.acquire(clientId)) {
       throw Object.assign(new Error("Another AI client currently controls this browser. Try again after its lease expires or is released."), { code: "DEVICE_BUSY" });
     }
-    if (method === "action_queue") {
-      const timeoutMs = actionQueueTimeoutMs(safeParams);
+    if (method === "set_profile" || method === "fill_profile") safeParams.profileSession = clientId;
+    if (method === "action_queue" || method === "fill_profile") {
+      const timeoutMs = method === "fill_profile" ? (safeParams.timeoutMs ?? 120000) + 30000 : actionQueueTimeoutMs(safeParams);
       const keepLease = setInterval(() => route.lease.acquire(clientId), 10_000);
       try {
         return await route.bridge.call(method, safeParams, timeoutMs);
@@ -486,8 +533,10 @@ export async function handleBrowserToolCall(
       case "browser_type_element": return textResult(await mutate("type_element", args));
       case "browser_wait_for": return textResult(await route.bridge.call("wait_for", args));
       case "browser_select_and_advance": return textResult(await mutate("select_and_advance", args));
+      case "browser_set_profile": return textResult(await mutate("set_profile", args));
+      case "browser_fill_profile":
       case "browser_action_queue": {
-        const result = await mutate("action_queue", args);
+        const result = await mutate(toolName === "browser_fill_profile" ? "fill_profile" : "action_queue", args);
         return { ...textResult(result), ...(result.success === false ? { isError: true } : {}) };
       }
       case "browser_release_control":
